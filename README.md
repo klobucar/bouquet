@@ -7,19 +7,19 @@ A Bloom filter library where the storage layout and concurrency model are
 you want; only that backend is compiled in.
 
 ```rust
-use bouquet::{Filter, Classical};
+use bouquet::ClassicalFilter;
 
-let mut filter = Filter::<Classical>::with_false_pos(0.001).expected_items(10_000);
+let mut filter = ClassicalFilter::with_false_pos(0.001).expected_items(10_000);
 filter.insert(&"hello");
 assert!(filter.contains(&"hello"));
 ```
 
-Switch to a concurrent backend by changing one type parameter:
+Switch to a concurrent backend by switching one type:
 
 ```rust
-use bouquet::{Filter, Atomic};
+use bouquet::AtomicFilter;
 
-let filter = Filter::<Atomic>::with_false_pos(0.001).expected_items(10_000);
+let filter = AtomicFilter::with_false_pos(0.001).expected_items(10_000);
 // &filter.insert(...) works from multiple threads — no &mut, no locks.
 ```
 
@@ -137,9 +137,9 @@ bouquet = "0.1"
 Build a filter from a target false-positive rate and an expected item count:
 
 ```rust
-use bouquet::{Filter, Classical};
+use bouquet::ClassicalFilter;
 
-let mut filter = Filter::<Classical>::with_false_pos(0.001).expected_items(1_000_000);
+let mut filter = ClassicalFilter::with_false_pos(0.001).expected_items(1_000_000);
 for item in items {
     filter.insert(&item);
 }
@@ -148,7 +148,7 @@ for item in items {
 Or pin the bit count directly and override the hash count:
 
 ```rust
-let mut filter = Filter::<Classical>::with_num_bits(1 << 20).hashes(7);
+let mut filter = ClassicalFilter::with_num_bits(1 << 20).hashes(7);
 ```
 
 Bring your own `BuildHasher`:
@@ -156,10 +156,16 @@ Bring your own `BuildHasher`:
 ```rust
 use foldhash::fast::RandomState;
 
-let mut filter = Filter::<Classical>::with_num_bits(1 << 20)
+let mut filter = ClassicalFilter::with_num_bits(1 << 20)
     .hasher(RandomState::default())
     .hashes(7);
 ```
+
+The generic [`Filter<B, S>`](https://docs.rs/bouquet/latest/bouquet/struct.Filter.html)
+is still the underlying type — the per-backend names
+(`ClassicalFilter`, `AtomicFilter`, `BlockedFilter`, `SimdBlockedFilter`)
+are just one-line type aliases. Generic code over backends still uses
+`Filter<B, S>` directly.
 
 ## What's deliberately *not* here
 

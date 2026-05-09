@@ -9,9 +9,9 @@
 //!
 //! ```
 //! # #[cfg(all(feature = "std", feature = "classical"))] {
-//! use bouquet::{Filter, Classical};
+//! use bouquet::ClassicalFilter;
 //!
-//! let filter = Filter::<Classical>::with_false_pos(0.001).expected_items(10_000);
+//! let filter = ClassicalFilter::with_false_pos(0.001).expected_items(10_000);
 //! filter.insert(&"hello");
 //! assert!(filter.contains(&"hello"));
 //! # }
@@ -59,13 +59,15 @@ use math::{MAX_HASHES, MIN_BITS};
 /// A Bloom filter parameterised by its storage [`Backend`] and a
 /// [`BuildHasher`].
 ///
-/// Construct one through the builder entry points
-/// [`Filter::with_false_pos`] or [`Filter::with_num_bits`]:
+/// Most callers don't write `Filter<Backend>` directly — they reach for one
+/// of the per-backend type aliases [`ClassicalFilter`], [`AtomicFilter`],
+/// [`BlockedFilter`], or [`SimdBlockedFilter`], which spell the backend in
+/// the name and skip the turbofish:
 ///
 /// ```
 /// # #[cfg(all(feature = "std", feature = "classical"))] {
-/// use bouquet::{Filter, Classical};
-/// let filter = Filter::<Classical>::with_false_pos(0.001).expected_items(10_000);
+/// use bouquet::ClassicalFilter;
+/// let filter = ClassicalFilter::with_false_pos(0.001).expected_items(10_000);
 /// filter.insert(&"hello");
 /// assert!(filter.contains(&"hello"));
 /// # }
@@ -76,6 +78,24 @@ pub struct Filter<B: Backend, S: BuildHasher = DefaultHasher> {
     hasher: S,
     num_hashes: u32,
 }
+
+/// Single-threaded filter with the flat textbook layout. Alias for
+/// `Filter<Classical, S>`.
+#[cfg(feature = "classical")]
+pub type ClassicalFilter<S = DefaultHasher> = Filter<Classical, S>;
+
+/// Concurrent filter, `Sync`, `&self` insert. Alias for `Filter<Atomic, S>`.
+#[cfg(feature = "atomic")]
+pub type AtomicFilter<S = DefaultHasher> = Filter<Atomic, S>;
+
+/// Single-threaded filter with cache-line-sized blocks. Alias for
+/// `Filter<Blocked, S>`.
+#[cfg(feature = "blocked")]
+pub type BlockedFilter<S = DefaultHasher> = Filter<Blocked, S>;
+
+/// `Blocked` with NEON / AVX2 hot loop. Alias for `Filter<SimdBlocked, S>`.
+#[cfg(feature = "simd")]
+pub type SimdBlockedFilter<S = DefaultHasher> = Filter<SimdBlocked, S>;
 
 #[cfg(feature = "std")]
 impl<B: Backend> Filter<B, DefaultHasher> {
