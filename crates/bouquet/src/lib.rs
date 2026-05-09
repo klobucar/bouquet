@@ -332,7 +332,7 @@ impl<B: Backend> WithNumBits<B, DefaultHasher> {
 
 impl<B: Backend, S: BuildHasher> Filter<B, S> {
     pub(crate) fn from_parts(num_bits: usize, num_hashes: u32, hasher: S) -> Self {
-        debug_assert!(num_bits >= MIN_BITS && num_bits % 64 == 0);
+        debug_assert!(num_bits >= MIN_BITS && num_bits.is_multiple_of(64));
         debug_assert!((1..=MAX_HASHES).contains(&num_hashes));
         Self {
             backend: B::with_capacity(num_bits),

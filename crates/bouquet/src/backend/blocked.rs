@@ -83,7 +83,7 @@ pub(crate) fn nth_in_block(h1: u32, h2: u32, i: u32) -> u32 {
 
 impl Backend for Blocked {
     fn with_capacity(num_bits: usize) -> Self {
-        debug_assert!(num_bits >= 64 && num_bits % 64 == 0);
+        debug_assert!(num_bits >= 64 && num_bits.is_multiple_of(64));
         // Round *up* to a multiple of BLOCK_BITS. Filter builder gives us
         // multiples of 64, which may not be multiples of 512.
         let snapped = num_bits.div_ceil(BLOCK_BITS) * BLOCK_BITS;

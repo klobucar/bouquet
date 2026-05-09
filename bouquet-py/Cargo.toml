@@ -2,7 +2,7 @@
 name = "bouquet-py"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "Python bindings for the bouquet pluggable Bloom filter library."
 license = "MIT"
 repository = "https://github.com/jklobucar/bouquet"
@@ -17,7 +17,7 @@ name = "bouquet"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
 bouquet = { path = "../crates/bouquet", default-features = false, features = ["std", "classical", "atomic", "blocked"] }
 
 [build-dependencies]

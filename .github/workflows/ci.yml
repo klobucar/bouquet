@@ -81,11 +81,11 @@ jobs:
         run: cargo test -p bouquet $FLAGS
 
   msrv:
-    name: MSRV 1.85
+    name: MSRV 1.95
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p bouquet --features atomic,serde,blocked,simd
 
@@ -124,7 +124,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.11", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

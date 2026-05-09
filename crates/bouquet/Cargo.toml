@@ -2,7 +2,7 @@
 name = "bouquet"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "Pluggable Bloom filters: pick your blooms (classical, atomic, more to come)."
 license = "MIT"
 repository = "https://github.com/jklobucar/bouquet"

@@ -220,8 +220,9 @@ also has the simplest hot loop, and the M-series memory subsystem makes
 
 ## MSRV
 
-`1.85` — the 2024-edition floor. Declared in `Cargo.toml` and pinned in CI.
-Bumped only as needed.
+`1.95` — current stable. This is a brand-new crate with no installed base,
+so there's no point in carrying a conservative MSRV. Pinned in CI; bumped
+freely as the ecosystem moves.
 
 ## License
 

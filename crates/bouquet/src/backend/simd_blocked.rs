@@ -76,7 +76,7 @@ fn build_mask(hash: u64, k: u32) -> [u64; BLOCK_WORDS] {
 
 impl Backend for SimdBlocked {
     fn with_capacity(num_bits: usize) -> Self {
-        debug_assert!(num_bits >= 64 && num_bits % 64 == 0);
+        debug_assert!(num_bits >= 64 && num_bits.is_multiple_of(64));
         let snapped = num_bits.div_ceil(BLOCK_BITS) * BLOCK_BITS;
         let num_blocks = snapped / BLOCK_BITS;
         let words = snapped / 64;

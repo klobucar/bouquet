@@ -33,7 +33,7 @@ impl Clone for Classical {
 impl Backend for Classical {
     fn with_capacity(num_bits: usize) -> Self {
         debug_assert!(
-            num_bits >= 64 && num_bits % 64 == 0,
+            num_bits >= 64 && num_bits.is_multiple_of(64),
             "Filter builder must round to a multiple of 64 ≥ 64; got {num_bits}"
         );
         let words = num_bits / 64;
