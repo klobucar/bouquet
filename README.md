@@ -23,6 +23,53 @@ let filter = Filter::<Atomic>::with_false_pos(0.001).expected_items(10_000);
 // &filter.insert(...) works from multiple threads — no &mut, no locks.
 ```
 
+## What's a Bloom filter, and when do you want one?
+
+A **Bloom filter** is a tiny probabilistic membership data structure: a
+fixed bit array plus `k` hash functions. To insert `x`, hash it `k` ways
+and set those bits. To query `x`, hash it `k` ways and check those bits —
+if any is unset, `x` is *definitely not* present; if all are set, `x` is
+*probably* present.
+
+That's it. The whole structure is a bit array.
+
+**The contract:**
+
+- **No false negatives.** If you inserted `x`, `contains(x)` returns true.
+- **False positives are bounded.** Some non-inserted items look present;
+  the rate is configurable (1%, 0.01%, whatever) and trades off against
+  memory.
+- **Memory is independent of item size.** A filter for 10M items at 1% FP
+  fits in ~12 MB whether each item is a 4-byte integer or a 4-KB document.
+  ~1.2 bytes per item, full stop.
+
+**You want one when the exact answer is expensive but a "probably-not"
+cheaply rules out most queries:**
+
+- *Dedupe before a write.* "Have we seen this URL / event ID / hash
+  before?" — check the filter, skip the database INSERT if it says yes.
+- *Negative caching.* Gate an auth check / DNS lookup / CDN origin fetch
+  on a local filter; if the filter says no, skip the round trip.
+- *LSM-tree reads.* RocksDB and friends keep a per-SSTable Bloom filter so
+  a key lookup can skip files that definitely don't contain it.
+- *Bioinformatics.* Short-read alignment uses Bloom filters to throw out
+  candidate positions before doing exact comparison.
+
+The mental model: **let the filter say "no" cheaply for the common case;
+only do the expensive lookup when it says "maybe."**
+
+**You do *not* want one when:**
+
+- You need to **enumerate** the contents. Bloom filters store no items,
+  only bits — there's nothing to iterate.
+- You need **deletion**. Basic Bloom is insert-only. Counting variants
+  exist but cost 4–8× the memory; not in `bouquet` v0.x.
+- The dataset is **small enough to fit in a `HashSet`**. Below ~10K items,
+  the constant cost of `k` hashes and `k` bit lookups isn't worth the
+  memory savings.
+- You need an **exact** answer. False positives are part of the contract;
+  use `HashSet` / `BTreeSet`.
+
 ## Why "pluggable"?
 
 Bloom filters get rewritten constantly because the *right* layout is
