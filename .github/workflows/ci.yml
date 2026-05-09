@@ -31,6 +31,7 @@ jobs:
         features:
           - ""
           - "atomic,serde"
+          - "blocked,simd"
           - "loom,atomic"
     steps:
       - uses: actions/checkout@v4
@@ -38,10 +39,24 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: clippy
+      - name: clippy (rust core)
         env:
           FEATURES: ${{ matrix.features }}
-        run: cargo clippy --no-default-features --features "std,classical,$FEATURES" --all-targets
+        run: cargo clippy -p bouquet --no-default-features --features "std,classical,$FEATURES" --all-targets
+
+  clippy-py:
+    name: clippy (bouquet-py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p bouquet-py --all-targets
 
   test:
     name: test
@@ -53,7 +68,7 @@ jobs:
           - profile: default
             flags: ""
           - profile: full
-            flags: "--features atomic,serde"
+            flags: "--features atomic,serde,blocked,simd"
           - profile: nostd-classical
             flags: "--no-default-features --features classical"
     steps:
@@ -63,7 +78,7 @@ jobs:
       - name: cargo test
         env:
           FLAGS: ${{ matrix.flags }}
-        run: cargo test $FLAGS
+        run: cargo test -p bouquet $FLAGS
 
   msrv:
     name: MSRV 1.75
@@ -72,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.75.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --features atomic,serde
+      - run: cargo build -p bouquet --features atomic,serde,blocked,simd
 
   loom:
     name: loom
@@ -86,7 +101,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Run only the loom test binary so the std-thread integration tests
       # don't get accidentally instrumented under loom's atomics.
-      - run: cargo test --features loom,atomic --test loom_atomic --release
+      - run: cargo test -p bouquet --features loom,atomic --test loom_atomic --release
 
   bench-dry-run:
     name: bench compile
@@ -95,4 +110,34 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --no-run --features atomic
+      - run: cargo bench -p bouquet --no-run --features simd,atomic
+
+  python-wheel:
+    name: bouquet-py wheel + pytest
+    # Path-filtered: skip when only the Rust core or docs change.
+    if: |
+      contains(toJSON(github.event.commits.*.modified), 'bouquet-py/')
+      || contains(toJSON(github.event.commits.*.modified), 'crates/bouquet/src/')
+      || contains(toJSON(github.event.commits.*.modified), 'crates/bouquet/Cargo.toml')
+      || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install maturin + pytest
+        run: pip install maturin pytest
+      - name: maturin develop
+        working-directory: bouquet-py
+        run: maturin develop --release
+      - name: pytest
+        working-directory: bouquet-py
+        run: pytest -v

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bouquet"
+version = "0.1.0"
+description = "Pluggable Bloom filters — Python bindings"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Jonathon Klobucar" }]
+keywords = ["bloom", "filter", "probabilistic", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Homepage = "https://github.com/jklobucar/bouquet"
+Repository = "https://github.com/jklobucar/bouquet"
+
+[tool.maturin]
+# Build a single ABI-stable wheel per (OS, arch). `abi3-py39` in Cargo.toml
+# means one wheel works for CPython 3.9+; we don't need a wheel per minor.
+features = ["pyo3/extension-module"]
+module-name = "bouquet"
+strip = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "maturin>=1.7,<2.0",
+]

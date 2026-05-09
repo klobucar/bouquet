@@ -1,0 +1,24 @@
+[package]
+name = "bouquet-py"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Python bindings for the bouquet pluggable Bloom filter library."
+license = "MIT"
+repository = "https://github.com/jklobucar/bouquet"
+readme = "README.md"
+publish = false  # PyPI only; not published to crates.io.
+
+[lib]
+# `import bouquet` from Python loads the cdylib produced by this crate. The
+# package name on Cargo's side is `bouquet-py` so it doesn't collide with the
+# `bouquet` rlib in the workspace.
+name = "bouquet"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+bouquet = { path = "../crates/bouquet", default-features = false, features = ["std", "classical", "atomic", "blocked"] }
+
+[build-dependencies]
+pyo3-build-config = "0.22"
