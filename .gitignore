@@ -1,0 +1,92 @@
+# --- Rust ---
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Criterion benchmark output is large and machine-specific; results live in
+# the README, not the repo.
+/target/criterion/
+/criterion/
+
+# rust-analyzer artifacts
+.rust_analyzer/
+
+# --- Python (for the bouquet-py workspace member) ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Build / packaging
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+wheels/
+*.whl
+.maturin/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / lint caches
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
+
+# --- IDEs / editors ---
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+.~lock.*
+
+# --- macOS / Linux / Windows noise ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# --- Local / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Coverage / profiling ---
+*.profraw
+*.profdata
+
+# --- Local notes intentionally not in this repo ---
+SCRATCH.md
+NOTES.md
+
+# --- Per-developer tool configs ---
+# Claude Code's per-project config. Personal preferences, scheduled tasks,
+# session locks. If you want to share team-wide Claude settings, commit a
+# .claude/settings.json explicitly and keep .local.json ignored.
+.claude/
+!.claude/settings.json

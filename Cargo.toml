@@ -1,0 +1,62 @@
+[package]
+name = "bouquet"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Pluggable Bloom filters: pick your blooms (classical, atomic, more to come)."
+license = "MIT"
+repository = "https://github.com/jklobucar/bouquet"
+keywords = ["bloom", "filter", "probabilistic", "no_std", "concurrent"]
+categories = ["data-structures", "no-std", "concurrency"]
+readme = "README.md"
+
+[features]
+default = ["std", "classical"]
+std = []
+classical = []
+atomic = ["dep:portable-atomic"]
+blocked = []
+simd = ["blocked"]
+serde = ["dep:serde"]
+loom = ["dep:loom"]
+
+[dependencies]
+libm = "0.2"
+siphasher = { version = "1.0", default-features = false }
+portable-atomic = { version = "1", default-features = false, optional = true }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"], optional = true }
+loom = { version = "0.7", optional = true }
+
+[target.'cfg(not(target_has_atomic = "64"))'.dependencies]
+portable-atomic = { version = "1", default-features = false, features = ["fallback"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+fastbloom = "0.7"
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
+serde_json = "1"
+ciborium = "0.2"
+rand = "0.8"
+foldhash = "0.1"
+
+[[bench]]
+name = "classical"
+harness = false
+
+[[bench]]
+name = "atomic"
+harness = false
+required-features = ["atomic"]
+
+[[bench]]
+name = "blocked"
+harness = false
+required-features = ["simd"]
+
+[lib]
+name = "bouquet"
+path = "src/lib.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

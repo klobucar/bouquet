@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # loom and serde are mutually exclusive (compile_error in lib.rs); we
+        # cover them as separate matrix entries instead of --all-features.
+        features:
+          - ""
+          - "atomic,serde"
+          - "loom,atomic"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: cargo clippy --no-default-features --features "std,classical,$FEATURES" --all-targets
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: default
+            flags: ""
+          - profile: full
+            flags: "--features atomic,serde"
+          - profile: nostd-classical
+            flags: "--no-default-features --features classical"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        env:
+          FLAGS: ${{ matrix.flags }}
+        run: cargo test $FLAGS
+
+  msrv:
+    name: MSRV 1.75
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --features atomic,serde
+
+  loom:
+    name: loom
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg loom -D warnings
+      LOOM_MAX_PREEMPTIONS: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Run only the loom test binary so the std-thread integration tests
+      # don't get accidentally instrumented under loom's atomics.
+      - run: cargo test --features loom,atomic --test loom_atomic --release
+
+  bench-dry-run:
+    name: bench compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --no-run --features atomic
