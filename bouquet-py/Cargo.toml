@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.95"
 description = "Python bindings for the bouquet pluggable Bloom filter library."
 license = "MIT"
-repository = "https://github.com/jklobucar/bouquet"
+repository = "https://github.com/klobucar/bouquet"
 readme = "README.md"
 publish = false  # PyPI only; not published to crates.io.
 

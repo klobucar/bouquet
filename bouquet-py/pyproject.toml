@@ -26,8 +26,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jklobucar/bouquet"
-Repository = "https://github.com/jklobucar/bouquet"
+Homepage = "https://github.com/klobucar/bouquet"
+Repository = "https://github.com/klobucar/bouquet"
 
 [tool.maturin]
 # Build a single ABI-stable wheel per (OS, arch). `abi3-py39` in Cargo.toml
