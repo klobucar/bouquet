@@ -220,7 +220,8 @@ also has the simplest hot loop, and the M-series memory subsystem makes
 
 ## MSRV
 
-`1.75`. Bumped only as needed; declared in `Cargo.toml` and tested in CI.
+`1.85` — the 2024-edition floor. Declared in `Cargo.toml` and pinned in CI.
+Bumped only as needed.
 
 ## License
 

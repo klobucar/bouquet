@@ -81,11 +81,11 @@ jobs:
         run: cargo test -p bouquet $FLAGS
 
   msrv:
-    name: MSRV 1.75
+    name: MSRV 1.85
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p bouquet --features atomic,serde,blocked,simd
 

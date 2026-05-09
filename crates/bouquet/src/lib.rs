@@ -36,7 +36,7 @@ mod serde_impl;
 compile_error!("`serde` and `loom` are mutually exclusive features");
 
 use core::fmt;
-use core::hash::{BuildHasher, Hash, Hasher};
+use core::hash::{BuildHasher, Hash};
 use core::marker::PhantomData;
 
 #[cfg(feature = "atomic")]
@@ -200,15 +200,9 @@ impl<B: Backend, S: BuildHasher> Filter<B, S> {
         }
     }
 
-    // `BuildHasher::hash_one` would express this in one line, but it
-    // stabilized in 1.76 and our MSRV is 1.75. Spelling it out keeps MSRV
-    // at the published value.
     #[inline]
-    #[allow(clippy::manual_hash_one)]
     fn hash_of<T: Hash + ?Sized>(&self, item: &T) -> u64 {
-        let mut h = self.hasher.build_hasher();
-        item.hash(&mut h);
-        h.finish()
+        self.hasher.hash_one(item)
     }
 }
 
@@ -402,8 +396,7 @@ impl fmt::Display for Error {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}
 
 // A handful of Filter-level tests that work without `std`, exercising the
 // `_seeded` entry points. Keeps `cargo test --no-default-features --features
