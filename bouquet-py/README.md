@@ -22,21 +22,25 @@ Wheels are published to PyPI per release. Until the first release, build
 from source:
 
 ```sh
-# from the workspace root
 cd bouquet-py
-uv venv
-source .venv/bin/activate
-uv pip install maturin pytest
-maturin develop --release    # builds the Rust extension and installs it
-pytest                       # runs the smoke tests
+uv venv --python 3.14 .venv  # any 3.11+ works; 3.14 is the dev pin
+uv sync --dev                # resolves pyproject.toml + builds the cdylib
+uv run pytest                # runs the smoke tests
 ```
 
-`maturin develop` rebuilds the extension on every Python source / Rust
-source change. For wheel builds (CI):
+`uv sync` invokes maturin transparently because of the `build-system =
+{ build-backend = "maturin" }` section in `pyproject.toml`. After a Rust
+source change, force a rebuild + reinstall:
 
 ```sh
-maturin build --release
-ls target/wheels/            # bouquet-*.whl
+uv sync --reinstall-package bouquet
+```
+
+For wheel builds (CI uses this):
+
+```sh
+uv run maturin build --release
+ls ../target/wheels/         # bouquet-*.whl, one ABI3 wheel per OS/arch
 ```
 
 ## What's exposed

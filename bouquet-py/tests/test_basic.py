@@ -107,18 +107,24 @@ def test_repr_is_useful():
 def test_seed_determinism():
     """Two filters built with the same seed must agree on every membership
     answer; two with different seeds must diverge on at least some inputs.
+
+    Filter is loaded to its design capacity so the FP rate is the configured
+    1%. With ~40 FPs expected per filter across 4000 queries and the FPs
+    falling on different items between the two seed values, the divergence
+    check is robust — if you under-load this filter the test goes flaky
+    because rare FPs may happen to coincide.
     """
     a = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=0xAAAA)
     b = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=0xAAAA)
     c = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=0xBBBB)
 
-    for i in range(50):
+    for i in range(1_000):
         a.insert(str(i).encode())
         b.insert(str(i).encode())
         c.insert(str(i).encode())
 
     diverged = False
-    for i in range(1000, 5000):
+    for i in range(10_000, 14_000):
         x = str(i).encode()
         assert a.contains(x) == b.contains(x), f"same-seed diverged at {i}"
         if a.contains(x) != c.contains(x):
