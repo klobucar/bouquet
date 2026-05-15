@@ -1,6 +1,18 @@
-# bouquet
+<h1 align="center">bouquet</h1>
 
-> Pick your blooms.
+<p align="center">
+  <img src="assets/logo.png" alt="bouquet logo" width="220" height="220">
+</p>
+
+<p align="center"><em>Pick your blooms.</em></p>
+
+<p align="center">
+  <a href="https://crates.io/crates/bouquet"><img src="https://img.shields.io/crates/v/bouquet.svg?logo=rust" alt="crates.io"></a>
+  <a href="https://docs.rs/bouquet"><img src="https://img.shields.io/docsrs/bouquet?logo=docs.rs" alt="docs.rs"></a>
+  <a href="https://github.com/klobucar/bouquet/actions/workflows/ci.yml"><img src="https://github.com/klobucar/bouquet/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/klobucar/bouquet/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/bouquet.svg" alt="MIT licensed"></a>
+  <img src="https://img.shields.io/badge/MSRV-1.95-blue.svg" alt="MSRV 1.95">
+</p>
 
 A Bloom filter library where the storage layout and concurrency model are
 *pluggable backends* behind a single ergonomic API. You pick the arrangement
