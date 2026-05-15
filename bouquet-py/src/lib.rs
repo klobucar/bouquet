@@ -1,10 +1,11 @@
 //! Python bindings for [`bouquet`](https://crates.io/crates/bouquet).
 //!
 //! Each backend exposed to Python is its own `#[pyclass]` because Rust
-//! generics don't cross the FFI. Methods take `&[u8]` (Python `bytes` /
-//! `bytearray` / `memoryview`); for arbitrary Python objects, callers should
-//! convert to bytes themselves (`obj.encode()`, `bytes(obj)`, etc.) before
-//! insert/contains so the hash domain is explicit.
+//! generics don't cross the FFI. Methods accept `bytes` / `bytearray` /
+//! `memoryview` or `str` — strings are encoded as UTF-8 before hashing, so
+//! `f.insert("hello")` and `f.insert(b"hello")` produce identical filter
+//! state. For richer Python objects, callers should serialize to bytes
+//! themselves so the hash domain stays explicit.
 
 // PyO3's `#[staticmethod]` macro expansion generates `.into()` calls that
 // clippy reports as `useless_conversion`. Allowed crate-wide because the
@@ -14,6 +15,57 @@
 use ::bouquet::{Atomic, Blocked, Classical, Filter};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pybacked::{PyBackedBytes, PyBackedStr};
+
+// ---------------------------------------------------------------------------
+// Input dispatch: accept bytes-like or str
+// ---------------------------------------------------------------------------
+
+/// Input for the single-item methods. PyO3 tries variants in order:
+/// `Bytes` covers `bytes` and `bytearray` (zero-copy — `PyBackedBytes`
+/// keeps a Python reference); `Str` covers `str` (CPython's UTF-8 cache,
+/// zero-copy when already encoded); `Other` is the buffer-protocol
+/// fallback for `memoryview` and the like, which pays one allocation
+/// since arbitrary buffer objects don't give us a stable borrow. All
+/// arms hash the same underlying bytes, so `f.insert("hello")` and
+/// `f.insert(b"hello")` produce identical filter state.
+#[derive(FromPyObject)]
+enum BytesOrStr {
+    Bytes(PyBackedBytes),
+    Str(PyBackedStr),
+    Other(Vec<u8>),
+}
+
+impl BytesOrStr {
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Bytes(b) => b,
+            Self::Str(s) => s.as_bytes(),
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// Owned variant used by `AtomicFilter.insert_many`, where the GIL is
+/// released for the duration of the loop. Items are extracted to owned
+/// `Vec<u8>` / `String` up front so the inserts can run without holding a
+/// Python reference across the GIL boundary.
+#[derive(FromPyObject)]
+enum OwnedBytesOrStr {
+    Bytes(Vec<u8>),
+    Str(String),
+}
+
+impl OwnedBytesOrStr {
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Bytes(b) => b,
+            Self::Str(s) => s.as_bytes(),
+        }
+    }
+}
 
 /// Validate a target false-positive rate before passing it to the bouquet
 /// builder, since `bouquet`'s builder panics on invalid inputs and we want a
@@ -41,7 +93,8 @@ fn check_items(n: usize) -> PyResult<()> {
 /// Single-threaded Bloom filter with a flat textbook layout.
 ///
 /// Construct with `ClassicalFilter.from_false_pos(fp, expected_items)` (or
-/// `.from_num_bits(...)`). Methods accept `bytes`-like input.
+/// `.from_num_bits(...)`). Methods accept `bytes` / `bytearray` /
+/// `memoryview` or `str` (UTF-8 encoded).
 #[pyclass(name = "ClassicalFilter")]
 struct ClassicalFilter {
     inner: Filter<Classical>,
@@ -103,21 +156,22 @@ impl ClassicalFilter {
         }
     }
 
-    /// Insert `item` (bytes-like). Returns `True` if all probe bits were
-    /// already set (i.e. the item was probably already present).
-    fn insert(&self, item: &[u8]) -> bool {
-        self.inner.insert(item)
+    /// Insert `item` (bytes, bytearray, memoryview, or str). Returns `True`
+    /// if all probe bits were already set (i.e. the item was probably
+    /// already present).
+    fn insert(&self, item: BytesOrStr) -> bool {
+        self.inner.insert(item.as_bytes())
     }
 
     /// Membership test. False positives are possible at the rate this filter
     /// was sized for; false negatives are not.
-    fn contains(&self, item: &[u8]) -> bool {
-        self.inner.contains(item)
+    fn contains(&self, item: BytesOrStr) -> bool {
+        self.inner.contains(item.as_bytes())
     }
 
-    /// `bytes in filter` — Python's `__contains__` protocol.
-    fn __contains__(&self, item: &[u8]) -> bool {
-        self.inner.contains(item)
+    /// `item in filter` — Python's `__contains__` protocol.
+    fn __contains__(&self, item: BytesOrStr) -> bool {
+        self.inner.contains(item.as_bytes())
     }
 
     /// Reset every bit to zero.
@@ -177,26 +231,26 @@ impl AtomicFilter {
         Ok(Self { inner })
     }
 
-    fn insert(&self, item: &[u8]) -> bool {
-        self.inner.insert(item)
+    fn insert(&self, item: BytesOrStr) -> bool {
+        self.inner.insert(item.as_bytes())
     }
 
-    fn contains(&self, item: &[u8]) -> bool {
-        self.inner.contains(item)
+    fn contains(&self, item: BytesOrStr) -> bool {
+        self.inner.contains(item.as_bytes())
     }
 
-    fn __contains__(&self, item: &[u8]) -> bool {
-        self.inner.contains(item)
+    fn __contains__(&self, item: BytesOrStr) -> bool {
+        self.inner.contains(item.as_bytes())
     }
 
     /// Bulk insert. Releases the GIL while running, so other Python threads
     /// can make progress. Returns the number of items that were already
     /// fully present (probable duplicates).
-    fn insert_many(&self, py: Python<'_>, items: Vec<Vec<u8>>) -> usize {
+    fn insert_many(&self, py: Python<'_>, items: Vec<OwnedBytesOrStr>) -> usize {
         py.allow_threads(|| {
             items
                 .iter()
-                .filter(|item| self.inner.insert(item.as_slice()))
+                .filter(|item| self.inner.insert(item.as_bytes()))
                 .count()
         })
     }
@@ -256,16 +310,16 @@ impl BlockedFilter {
         Ok(Self { inner })
     }
 
-    fn insert(&self, item: &[u8]) -> bool {
-        self.inner.insert(item)
+    fn insert(&self, item: BytesOrStr) -> bool {
+        self.inner.insert(item.as_bytes())
     }
 
-    fn contains(&self, item: &[u8]) -> bool {
-        self.inner.contains(item)
+    fn contains(&self, item: BytesOrStr) -> bool {
+        self.inner.contains(item.as_bytes())
     }
 
-    fn __contains__(&self, item: &[u8]) -> bool {
-        self.inner.contains(item)
+    fn __contains__(&self, item: BytesOrStr) -> bool {
+        self.inner.contains(item.as_bytes())
     }
 
     fn clear(&mut self) {

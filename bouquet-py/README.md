@@ -7,12 +7,13 @@ with a Rust core.
 import bouquet
 
 f = bouquet.ClassicalFilter.from_false_pos(0.001, 100_000, seed=0xfeedface)
-f.insert(b"hello")
-assert b"hello" in f
+f.insert("hello")           # str is fine — encoded as UTF-8 before hashing
+assert "hello" in f
+assert b"hello" in f        # bytes work too; str + equivalent bytes hash the same
 
 # Concurrent inserts: GIL is released during the bulk loop.
 g = bouquet.AtomicFilter.from_false_pos(0.001, 1_000_000)
-items = [str(i).encode() for i in range(1_000_000)]
+items = [str(i) for i in range(1_000_000)]
 duplicates = g.insert_many(items)  # parallelizable across Python threads
 ```
 
@@ -56,10 +57,15 @@ ls ../target/wheels/         # bouquet-*.whl, one ABI3 wheel per OS/arch
 
 ## Hashing model
 
-Methods take `bytes`-like input (`bytes`, `bytearray`, `memoryview`). For
-arbitrary Python objects, encode them yourself before calling — `str.encode()`
-for strings, an explicit serializer for richer types. This keeps the hash
-domain explicit instead of hidden behind `__hash__`.
+Methods accept `bytes` / `bytearray` / `memoryview` or `str`. Strings are
+encoded as UTF-8 before hashing, so `f.insert("hello")` and `f.insert(b"hello")`
+produce identical filter state — pass whichever is more natural at the call
+site.
+
+For richer Python objects, serialize to bytes yourself before calling. This
+keeps the hash domain explicit instead of hidden behind `__hash__`, and
+avoids the cross-process instability that `PYTHONHASHSEED` randomization
+would otherwise introduce.
 
 ## License
 

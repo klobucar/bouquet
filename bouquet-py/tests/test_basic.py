@@ -96,6 +96,73 @@ def test_atomic_insert_many_releases_gil():
     assert dups_second > 900
 
 
+@pytest.mark.parametrize(
+    "cls",
+    [
+        bouquet.ClassicalFilter,
+        bouquet.AtomicFilter,
+        bouquet.BlockedFilter,
+    ],
+)
+def test_str_input_accepted(cls):
+    """`str` inputs are encoded as UTF-8 and hash identically to the
+    equivalent `bytes`. This is the friendlier API: callers can pass
+    cache keys / URLs / IDs directly without `.encode()`."""
+    f = cls.from_false_pos(0.01, 1_000, seed=0)
+    f.insert("hello")
+    assert f.contains("hello")
+    assert "hello" in f
+    # str and bytes equivalence — same hash, same filter state.
+    assert f.contains(b"hello")
+    assert b"hello" in f
+    # Non-ASCII round-trips through UTF-8.
+    f.insert("café")
+    assert f.contains("café")
+    assert f.contains("café".encode())
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        bouquet.ClassicalFilter,
+        bouquet.AtomicFilter,
+        bouquet.BlockedFilter,
+    ],
+)
+def test_bytearray_and_memoryview_still_work(cls):
+    """Regression guard: switching to PyBackedBytes / PyBackedStr / Vec<u8>
+    dispatch must not drop the bytes-like types the original `&[u8]`
+    signature accepted."""
+    f = cls.from_false_pos(0.01, 1_000, seed=0)
+    f.insert(bytearray(b"ba"))
+    f.insert(memoryview(b"mv"))
+    assert f.contains(b"ba")
+    assert f.contains(b"mv")
+    assert f.contains(bytearray(b"ba"))
+    assert f.contains(memoryview(b"mv"))
+
+
+def test_atomic_insert_many_accepts_mixed_str_and_bytes():
+    """`insert_many` should accept a list mixing `str` and `bytes`. The
+    OwnedBytesOrStr dispatch handles each item independently."""
+    f = bouquet.AtomicFilter.from_false_pos(0.001, 1_000, seed=0)
+    items = ["alpha", b"beta", "gamma", bytearray(b"delta")]
+    dups = f.insert_many(items)
+    assert dups == 0
+    for item in ("alpha", "beta", "gamma", "delta"):
+        assert f.contains(item)
+        assert f.contains(item.encode())
+
+
+def test_rejects_unsupported_types():
+    """Non-bytes/str inputs should raise a clear error rather than coerce."""
+    f = bouquet.ClassicalFilter.from_false_pos(0.01, 100, seed=0)
+    with pytest.raises((TypeError, ValueError)):
+        f.insert(42)
+    with pytest.raises((TypeError, ValueError)):
+        f.insert(None)
+
+
 def test_repr_is_useful():
     f = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=0)
     r = repr(f)
