@@ -3,7 +3,7 @@
 [upstream] # Source of software & tooling
 repo = "https://github.com/gominimal/pkgs"
 branch = "main"
-locked_commit = "cc650fc027b9e883d6bf379988fd810f66107417"
+locked_commit = "7a479b0bb899b27eb629b4404427fae9aa50b549"
 
 [harness]
 use = "rust"
@@ -13,5 +13,11 @@ state_key = "dev"
 
 [tasks.shell]
 interactive = true
-packages = ["base", "claude-code"]
+packages = ["base"]
 exec = "bash --noprofile -l"
+
+[tasks.claude]
+interactive = true
+packages = ["base", "bash","git", "uv", "claude-code", "curl"]
+exec = "claude --dangerously-skip-permissions"
+runtime_packages = ["python", "rust"]
