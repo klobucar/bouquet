@@ -12,6 +12,13 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      # For this action the `@rev` selects the Rust toolchain (`@stable`,
+      # `@nightly`, `@1.95.0`), not an action release. Dependabot reads the
+      # MSRV pin as an action version and "upgrades" it to a Rust release
+      # that does not exist yet, which breaks the MSRV job. The MSRV is
+      # bumped by hand, together with `rust-version` in Cargo.toml.
+      - dependency-name: "dtolnay/rust-toolchain"
 
   - package-ecosystem: cargo
     directory: "/"
