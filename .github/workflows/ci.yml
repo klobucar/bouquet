@@ -214,9 +214,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Run `cargo audit` directly rather than through rustsec/audit-check.
+      # That action reports by creating a check run, which needs
+      # `checks: write`; GitHub withholds write tokens from fork PRs, so it
+      # fails for outside contributors no matter what we grant. The CLI only
+      # reads Cargo.lock, needs no token, and fails the job on any
+      # vulnerability. Unmaintained / yanked crates are warnings, printed in
+      # the log, and do not fail it. Pinned so a new release cannot change
+      # the result of an unrelated run.
+      - name: install cargo-audit
+        run: cargo install cargo-audit --version 0.23.0 --locked
+      - name: cargo audit
+        run: cargo audit
 
   # Static analysis of the workflows themselves: catches unpinned actions,
   # credential persistence, cache poisoning, and expression injection. The
