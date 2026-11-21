@@ -5,7 +5,8 @@
 //! size sweep — Classical's flat layout vs Blocked's 1-line-per-op vs the
 //! SIMD acceleration on the wide load–test–store.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
 use bouquet::{Blocked, Classical, Filter, SimdBlocked};
 use fastbloom::BloomFilter;
