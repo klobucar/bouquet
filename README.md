@@ -6,16 +6,9 @@
 
 <p align="center"><em>Pick your blooms.</em></p>
 
-<!--
-  The crates.io and docs.rs badges are intentionally absent until the first
-  publish: `bouquet` is not on crates.io yet, so both would render as broken
-  images, and the shields.io license badge reads its metadata *from*
-  crates.io, so it would break too. Restore them in the release commit:
-
+<p align="center">
   <a href="https://crates.io/crates/bouquet"><img src="https://img.shields.io/crates/v/bouquet.svg?logo=rust" alt="crates.io"></a>
   <a href="https://docs.rs/bouquet"><img src="https://img.shields.io/docsrs/bouquet?logo=docs.rs" alt="docs.rs"></a>
--->
-<p align="center">
   <a href="https://github.com/klobucar/bouquet/actions/workflows/ci.yml"><img src="https://github.com/klobucar/bouquet/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licensed"></a>
   <img src="https://img.shields.io/badge/MSRV-1.95-blue.svg" alt="MSRV 1.95">
