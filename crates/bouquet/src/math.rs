@@ -119,7 +119,9 @@ mod tests {
                 let Some(m) = optimal_num_bits(items, fp) else {
                     // Only a 32-bit `usize` can run out of room here (e.g.
                     // 1e8 items at 1e-9 needs ~4.3e9 bits).
-                    assert!(usize::BITS < 64, "items={items} fp={fp} must fit");
+                    #[cfg(target_pointer_width = "64")]
+                    panic!("items={items} fp={fp} must fit in a 64-bit usize");
+                    #[cfg(not(target_pointer_width = "64"))]
                     continue;
                 };
                 let k = optimal_num_hashes(m, items).expect("valid");
