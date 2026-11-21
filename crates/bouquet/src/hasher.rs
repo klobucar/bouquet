@@ -10,7 +10,7 @@ use core::hash::BuildHasher;
 use siphasher::sip::SipHasher13;
 
 /// Keyed SipHash-1-3 `BuildHasher`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DefaultHasher {
     key0: u64,
@@ -54,6 +54,15 @@ impl DefaultHasher {
 impl Default for DefaultHasher {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Redacts the key. The key is what makes the default hasher HashDoS
+/// resistant, and `Filter` and the builders embed the hasher in their own
+/// `Debug` output, so a derived impl would leak it into any `{:?}` log line.
+impl core::fmt::Debug for DefaultHasher {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DefaultHasher").finish_non_exhaustive()
     }
 }
 
@@ -109,6 +118,13 @@ mod tests {
         let a = DefaultHasher::new();
         let b = DefaultHasher::new();
         assert_ne!(a.seed(), b.seed());
+    }
+
+    #[test]
+    fn debug_does_not_leak_key() {
+        extern crate alloc;
+        let h = DefaultHasher::with_seed(0xfeed_face_dead_beef_cafe_babe_1234_5678);
+        assert_eq!(alloc::format!("{h:?}"), "DefaultHasher { .. }");
     }
 
     #[test]

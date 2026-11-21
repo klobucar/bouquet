@@ -1,0 +1,115 @@
+name: Release crate
+
+# Publishes `bouquet` to crates.io via Trusted Publishing (OIDC) — no
+# long-lived API token lives in repository secrets.
+#
+# ONE-TIME SETUP: crates.io cannot register a Trusted Publisher for a crate
+# that does not exist yet (RFC 3691: "A Trusted Publisher Configuration can
+# only be created after an initial manual publishing of a crate"). So the
+# very first 0.1.0 must go out from a laptop with `cargo publish`. After
+# that, add the publisher under Settings -> Trusted Publishing on the crate
+# page with:
+#
+#     Repository owner: klobucar
+#     Repository name:  bouquet
+#     Workflow file:    release-crate.yml
+#     Environment:      release
+#
+# and every subsequent release runs through here.
+#
+# Tag convention: `v*` releases the Rust crate. The Python wheels use the
+# `py-v*` prefix (see release-wheels.yml) so the two artifacts can version
+# independently — a bindings-only fix should not force a core release.
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets you rehearse everything except the upload.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package and verify, but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# A second run for the same ref (re-pushed tag, double-clicked dispatch) must
+# queue, never race: releases are immutable and cannot be retried.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    # Gate the OIDC identity behind an environment so the trusted-publisher
+    # config can scope to it, and so you can require a manual approval.
+    environment: release
+    permissions:
+      # Needed to check out the tagged source; nothing is written back.
+      contents: read
+      # Required: this is what lets the runner mint the OIDC token that
+      # crates-io-auth-action exchanges for a 30-minute publish token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rustup ships on the runner image, so no third-party action sits in
+      # the job that holds the OIDC publish identity.
+      - name: install stable toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # Deliberately NO build cache here. A release build must come from a
+      # clean tree: cache entries are writable by any branch/PR workflow, so
+      # a poisoned entry restored into this job would be baked into an
+      # immutable crates.io release. Releases are rare; the rebuild is cheap
+      # insurance. (zizmor: cache-poisoning)
+
+      # A tag that disagrees with Cargo.toml publishes the wrong version
+      # under the right name, and crates.io releases are immutable. Fail
+      # before the upload, not after.
+      - name: verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          manifest="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "bouquet") | .version')"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml: $manifest"
+          echo "git tag:    $tag"
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+
+      # `--locked` so the published build resolves exactly what CI tested.
+      - name: package (verifies the crate builds from its own tarball)
+        run: cargo package -p bouquet --locked
+
+      # The crate's own README lives at the workspace root and is pulled in
+      # via `readme = "../../README.md"`. LICENSE is NOT auto-included from
+      # outside the package dir, so confirm it made the tarball rather than
+      # shipping MIT-licensed code with no copyright notice.
+      - name: verify LICENSE is in the package
+        run: |
+          set -euo pipefail
+          if ! cargo package -p bouquet --locked --list | grep -qx 'LICENSE'; then
+            echo "::error::LICENSE is missing from the .crate tarball"
+            cargo package -p bouquet --locked --list
+            exit 1
+          fi
+
+      - name: authenticate to crates.io
+        # workflow_dispatch is rehearsal-only; never publish an untagged ref.
+        if: ${{ startsWith(github.ref, 'refs/tags/') && !inputs.dry_run }}
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: cargo publish
+        if: ${{ startsWith(github.ref, 'refs/tags/') && !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p bouquet --locked

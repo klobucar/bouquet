@@ -24,7 +24,7 @@ use loom::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(feature = "loom"))]
 use portable_atomic::{AtomicU64, Ordering};
 
-use super::{double_hash, nth_index, Backend};
+use super::{double_hash, nth_index, Backend, Layout};
 
 /// Atomic Bloom backend. `Box<[AtomicU64]>`, `Relaxed` ordering, `Sync`.
 #[derive(Debug)]
@@ -47,18 +47,25 @@ impl Clone for Atomic {
 }
 
 impl Backend for Atomic {
+    const LAYOUT: Layout = Layout::Flat;
+
     fn with_capacity(num_bits: usize) -> Self {
-        debug_assert!(
-            num_bits >= 64 && num_bits.is_multiple_of(64),
-            "Filter builder must round to a multiple of 64 ≥ 64; got {num_bits}"
-        );
+        Self::try_with_capacity(num_bits).expect("Atomic::with_capacity")
+    }
+
+    fn try_with_capacity(num_bits: usize) -> Result<Self, crate::Error> {
+        // Round up to a whole number of words, floor at one word. The hot
+        // loops index with `get_unchecked` on the strength of
+        // `num_bits == bits.len() * 64`, so this must hold for *every*
+        // construction path — `Backend::with_capacity` is publicly callable,
+        // not just reachable through the Filter builder.
+        let num_bits = super::round_up_to(num_bits, 64)?;
         let words = num_bits / 64;
-        let mut v: Vec<AtomicU64> = Vec::with_capacity(words);
-        v.resize_with(words, || AtomicU64::new(0));
-        Self {
+        let v = super::try_alloc_words(words, num_bits, || AtomicU64::new(0))?;
+        Ok(Self {
             bits: v.into_boxed_slice(),
             num_bits,
-        }
+        })
     }
 
     #[inline]
@@ -176,6 +183,18 @@ mod tests {
         let b = Atomic::with_capacity(64 * 1024);
         b.set_item(0, 7);
         assert!(b.count_ones() >= 5);
+    }
+
+    /// See `Classical`'s test of the same name: arbitrary sizes must be
+    /// rounded up so the unchecked indexing invariant holds.
+    #[test]
+    fn with_capacity_rounds_up_arbitrary_sizes() {
+        let b = Atomic::with_capacity(65);
+        assert_eq!(b.num_bits(), 128);
+        b.set_item(u64::MAX, 1);
+        assert!(b.check_item(u64::MAX, 1));
+
+        assert_eq!(Atomic::with_capacity(0).num_bits(), 64);
     }
 
     #[test]

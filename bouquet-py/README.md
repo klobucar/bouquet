@@ -1,7 +1,20 @@
-# bouquet (Python bindings)
+# bouquet-bloom (Python bindings)
 
-Python bindings for [`bouquet`](../crates/bouquet) — pluggable Bloom filters
-with a Rust core.
+Python bindings for [`bouquet`](https://github.com/klobucar/bouquet) —
+pluggable Bloom filters with a Rust core.
+
+> **Not published yet.** There is no `bouquet-bloom` on PyPI at the time of
+> writing, so the install line below will not work until the first release.
+> Build from source in the meantime (see below).
+
+Installed as **`bouquet-bloom`**, imported as **`bouquet`**:
+
+```sh
+pip install bouquet-bloom
+```
+
+The bare `bouquet` name on PyPI belongs to an unrelated placeholder project —
+`pip install bouquet` will *not* get you this library.
 
 ```python
 import bouquet
@@ -17,16 +30,23 @@ items = [str(i) for i in range(1_000_000)]
 duplicates = g.insert_many(items)  # parallelizable across Python threads
 ```
 
-## Installation
+## Building from source
 
-Wheels are published to PyPI per release. Until the first release, build
-from source:
+Any Python 3.11+ works; one ABI3 wheel serves all of them.
 
 ```sh
 cd bouquet-py
-uv venv --python 3.14 .venv  # any 3.11+ works; 3.14 is the dev pin
-uv sync --dev                # resolves pyproject.toml + builds the cdylib
-uv run pytest                # runs the smoke tests
+uv sync                      # locked dev environment + builds the cdylib
+uv run --no-sync pytest      # runs the test suite
+```
+
+`--no-sync` matters after a Rust change: a bare `uv run` re-syncs the project
+and can reinstall a cached wheel over the extension you just built. The
+reliable loop is:
+
+```sh
+uv run --no-sync maturin develop --release
+uv run --no-sync pytest
 ```
 
 `uv sync` invokes maturin transparently because of the `build-system =
@@ -34,26 +54,36 @@ uv run pytest                # runs the smoke tests
 source change, force a rebuild + reinstall:
 
 ```sh
-uv sync --reinstall-package bouquet
+uv sync --reinstall-package bouquet-bloom
 ```
 
 For wheel builds (CI uses this):
 
 ```sh
 uv run maturin build --release
-ls ../target/wheels/         # bouquet-*.whl, one ABI3 wheel per OS/arch
+ls ../target/wheels/         # bouquet_bloom-*.whl, one ABI3 wheel per OS/arch
 ```
 
 ## What's exposed
 
 | Python class      | Rust backend         | Notes                                 |
 |-------------------|----------------------|---------------------------------------|
-| `ClassicalFilter` | `bouquet::Classical` | Single-threaded inserts.              |
-| `AtomicFilter`    | `bouquet::Atomic`    | Concurrent inserts; releases the GIL. |
-| `BlockedFilter`   | `bouquet::Blocked`   | Cache-line-blocked layout.            |
+| `ClassicalFilter` | `bouquet::Classical` | Single-threaded. The only one with `from_num_bits`. |
+| `AtomicFilter`    | `bouquet::Atomic`    | Concurrent; the only one with `insert_many`, which releases the GIL. |
+| `BlockedFilter`   | `bouquet::Blocked`   | Cache-line-blocked layout. Trades accuracy for locality — see the root README. |
+
+The API is deliberately asymmetric: `from_num_bits` exists only on
+`ClassicalFilter`, and `insert_many` only on `AtomicFilter`. Every class has
+`insert`, `contains`, `__contains__`, `clear`, `estimate_count`,
+`is_saturated`, `num_bits`, and `num_hashes`.
+
+`ClassicalFilter` and `BlockedFilter` wrap `!Sync` Rust types and are pinned
+to the thread that created them — passing one to another thread raises rather
+than racing. `AtomicFilter` is the one built for sharing.
 
 `SimdBlocked` is intentionally not exposed yet — see
-[`ROADMAP.md`](../ROADMAP.md) at the workspace root for the open redesign.
+[ROADMAP.md](https://github.com/klobucar/bouquet/blob/main/ROADMAP.md) for
+the open redesign.
 
 ## Hashing model
 
@@ -69,4 +99,4 @@ would otherwise introduce.
 
 ## License
 
-MIT — see [`LICENSE`](../LICENSE) at the workspace root.
+MIT — see [LICENSE](https://github.com/klobucar/bouquet/blob/main/LICENSE).

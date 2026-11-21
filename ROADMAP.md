@@ -6,11 +6,12 @@ particular timeline.
 
 ## Shipped
 
-- `Classical` (v0.1) — flat `Box<[Cell<u64>]>`.
-- `Atomic` (v0.1) — `Box<[AtomicU64]>`, concurrent insert via `&self`.
-- `Blocked` (v0.2) — 512-bit cache-line-sized blocks. Closes the
-  insert-at-large-size gap.
-- `SimdBlocked` (v0.2) — `Blocked` with NEON / AVX2 hot-loop dispatch.
+- `Classical` — flat `Box<[Cell<u64>]>`.
+- `Atomic` — `Box<[AtomicU64]>`, concurrent insert via `&self`.
+- `Blocked` — 512-bit cache-line-sized blocks. Aimed at the
+  insert-at-large-size gap; on Apple silicon the measured win is within
+  noise, and it costs 1.2–14× the false-positive rate depending on target.
+- `SimdBlocked` — `Blocked` with NEON / AVX2 hot-loop dispatch.
 
 ## Backends
 
@@ -78,6 +79,7 @@ Out of scope for any 0.x release; tracked here so they aren't reinvented:
 - **`union` / `intersect`**: cheap when filters share `(num_bits, k, hasher)`.
   The `Filter::is_compatible` predicate already exists; the operations
   themselves are a small followup.
-- **Builder errors instead of panics**: the v0.1 builder panics on invalid
-  inputs (`fp <= 0`, `num_bits == 0`, etc.). A `try_*` variant returning
-  `Result` would be friendly for callers that take untrusted parameters.
+- ~~**Builder errors instead of panics**~~: done.
+  `WithFalsePos::try_expected_items`, `WithNumBits::try_expected_items`, and
+  `WithNumBits::try_hashes` return `Result` and report allocation failure
+  instead of aborting. The infallible forms remain for literal sizes.

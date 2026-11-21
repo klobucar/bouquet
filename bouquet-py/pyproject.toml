@@ -3,8 +3,14 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "bouquet"
-version = "0.1.0"
+# Distribution name is `bouquet-bloom`; the import name is `bouquet` (see
+# `module-name` below). The bare `bouquet` name on PyPI is held by an
+# unrelated placeholder project.
+name = "bouquet-bloom"
+# Single source of truth for the version is `Cargo.toml`. maturin reads it
+# from there and stamps the wheel, so it can't drift from the
+# `env!("CARGO_PKG_VERSION")` that backs the module's `__version__`.
+dynamic = ["version"]
 description = "Pluggable Bloom filters — Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,7 +25,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
+    "Typing :: Typed",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
@@ -30,14 +38,51 @@ Homepage = "https://github.com/klobucar/bouquet"
 Repository = "https://github.com/klobucar/bouquet"
 
 [tool.maturin]
-# Build a single ABI-stable wheel per (OS, arch). `abi3-py39` in Cargo.toml
-# means one wheel works for CPython 3.9+; we don't need a wheel per minor.
+# Build a single ABI-stable wheel per (OS, arch). `abi3-py311` in Cargo.toml
+# means one wheel works for CPython 3.11+; we don't need a wheel per minor.
 features = ["pyo3/extension-module"]
 module-name = "bouquet"
 strip = true
+# A top-level `bouquet.pyi` is auto-detected by maturin and shipped as the
+# package's type stub (PEP 561), so editors and type checkers see the API.
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "maturin>=1.7,<2.0",
+    "ruff>=0.14",
+    "ty>=0.0.1",
 ]
+
+[tool.uv]
+# Dependency cooldown: ignore any distribution uploaded in the last week when
+# resolving. New releases must "age" 7 days before uv will lock them, which
+# blunts the window for a compromised/yanked release to land in our lockfile.
+exclude-newer = "1 week"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",      # docstrings: not enforced for these bindings/tests
+    "COM812", # trailing-comma: conflicts with the formatter
+    "ISC001", # implicit-str-concat: conflicts with the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # asserts are the substance of a test
+    "ANN",     # test functions don't need type annotations
+    "PLR2004", # magic numbers are fine in test fixtures/assertions
+    "PT011",   # pytest.raises(ValueError) without match is acceptable here
+    "INP001",  # tests/ is intentionally not an importable package
+]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.terminal]
+error-on-warning = true
