@@ -4,7 +4,23 @@ All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0, minor
 versions may break.
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-11-21
+
+Test and benchmark maintenance. **No library code changed** since 0.1.0; the
+code under `src/` is functionally identical, so there is nothing to upgrade
+for.
+
+- Tests that drive `Atomic` from plain threads
+  (`atomic_filter_concurrent_insert`, `atomic_empirical_fp_matches_theory`)
+  are no longer built under the `loom` feature, where loom's atomics panic
+  outside a `loom::model`. A bare `cargo test --features loom,atomic` now
+  passes; model-checked coverage stays in `tests/loom_atomic.rs`.
+- Benchmarks use `std::hint::black_box` instead of the deprecated
+  `criterion::black_box`.
+- Dev-dependencies updated (criterion 0.8, fastbloom 0.17, rand 0.10,
+  foldhash 0.2).
+
+## [0.1.0] — 2026-11-21
 
 Initial release. Four Bloom filter backends behind one generic API:
 `Classical` (flat), `Atomic` (concurrent, `Sync`), `Blocked` (512-bit
