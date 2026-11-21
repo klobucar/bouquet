@@ -27,15 +27,23 @@ pub const MIN_BITS: usize = 64;
 ///
 /// `m = -n · ln(p) / (ln 2)²`, rounded up to the nearest `u64` word.
 ///
-/// Returns `None` if `num_items == 0`, `fp <= 0.0`, `fp >= 1.0`, or `fp` is
-/// NaN.
+/// Returns `None` if `num_items == 0`, `fp <= 0.0`, `fp >= 1.0`, `fp` is
+/// NaN, or the computed size cannot be rounded up to a whole word without
+/// overflowing `usize`.
 pub fn optimal_num_bits(num_items: usize, fp: f64) -> Option<usize> {
     if num_items == 0 || !fp.is_finite() || fp <= 0.0 || fp >= 1.0 {
         return None;
     }
     let n = num_items as f64;
-    let m = -(n * log(fp)) / LN_2_SQUARED;
-    let m = ceil(m) as usize;
+    let m = ceil(-(n * log(fp)) / LN_2_SQUARED);
+    // Without this guard the `as usize` cast saturates at `usize::MAX` and
+    // `round_up_to_word` then wraps to 0 in release builds. `usize::MAX / 2`
+    // bits (~1.2 EB on 64-bit) is far beyond anything allocatable, so the
+    // cap costs nothing real.
+    if m >= (usize::MAX / 2) as f64 {
+        return None;
+    }
+    let m = m as usize;
     Some(round_up_to_word(m.max(MIN_BITS)))
 }
 
@@ -53,8 +61,13 @@ pub fn optimal_num_hashes(num_bits: usize, num_items: usize) -> Option<u32> {
     let m = num_bits as f64;
     let n = num_items as f64;
     let k = (m / n) * LN_2;
+    // Clamp *before* narrowing. `rounded.max(1) as u32` truncates modulo
+    // 2^32, so a true optimum of exactly 2^32 used to narrow to 0 — a k=0
+    // filter, which sets nothing on insert and answers `true` for every
+    // query. Clamping in `i64` keeps the documented `[1, MAX_HASHES]`
+    // postcondition for every input.
     let rounded = libm::round(k) as i64;
-    Some((rounded.max(1) as u32).min(MAX_HASHES))
+    Some(rounded.clamp(1, MAX_HASHES as i64) as u32)
 }
 
 /// Expected false-positive rate for a filter of `num_bits` bits holding
@@ -103,7 +116,12 @@ mod tests {
     fn sizing_round_trips_across_magnitudes() {
         for items in [100, 10_000, 1_000_000, 100_000_000] {
             for fp in [0.1, 0.01, 0.001, 1e-6, 1e-9] {
-                let m = optimal_num_bits(items, fp).expect("valid");
+                let Some(m) = optimal_num_bits(items, fp) else {
+                    // Only a 32-bit `usize` can run out of room here (e.g.
+                    // 1e8 items at 1e-9 needs ~4.3e9 bits).
+                    assert!(usize::BITS < 64, "items={items} fp={fp} must fit");
+                    continue;
+                };
                 let k = optimal_num_hashes(m, items).expect("valid");
                 let predicted = expected_fp(m, items, k).expect("valid");
                 // Predicted FP at the optimal k should be ≤ target FP, since
@@ -134,6 +152,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overflowing_sizes() {
+        // A size whose bit count cannot fit in usize must be rejected, not
+        // saturate-then-wrap to 0 (which previously fed a zero-word
+        // allocation to the backends in release builds).
+        assert!(optimal_num_bits(usize::MAX, 1e-9).is_none());
+        assert!(optimal_num_bits(usize::MAX / 2, 1e-12).is_none());
+    }
+
+    #[test]
     fn min_bits_floor() {
         let m = optimal_num_bits(1, 0.99).unwrap();
         assert!(m >= MIN_BITS);
@@ -144,6 +171,42 @@ mod tests {
         // Pathologically over-provisioned: m huge, n tiny.
         let k = optimal_num_hashes(usize::MAX / 2, 1).unwrap();
         assert!(k <= MAX_HASHES);
+    }
+
+    /// Regression: the clamp used to narrow to `u32` before bounding, so
+    /// optima at or just above 2^32 wrapped. (64-bit only: these bit counts
+    /// do not fit a 32-bit `usize`.) `6_196_328_018` bits for one
+    /// item has a true optimum of ~4.29e9 hashes; it must clamp to
+    /// `MAX_HASHES`, never to 0 or to some small wrapped remainder.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn hashes_clamp_before_narrowing() {
+        for &(m, n) in &[
+            (6_196_328_018usize, 1usize),
+            (6_196_328_064, 1),
+            (6_196_328_018_048, 1000),
+        ] {
+            let k = optimal_num_hashes(m, n).expect("valid inputs");
+            assert_eq!(k, MAX_HASHES, "m={m} n={n} produced k={k}");
+        }
+    }
+
+    /// The documented postcondition, swept across the 2^32 boundary where
+    /// the truncation bug lived.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn hashes_always_within_documented_range() {
+        // `k = m/n * ln2`, so sweeping `m` around `2^32 / ln2` sweeps the
+        // computed `k` across the 2^32 boundary where the cast wrapped.
+        let base = ((1u64 << 32) as f64 / LN_2) as usize;
+        for delta in 0..2_000usize {
+            let m = base.saturating_add(delta);
+            let k = optimal_num_hashes(m, 1).expect("valid inputs");
+            assert!(
+                (1..=MAX_HASHES).contains(&k),
+                "m={m} produced out-of-range k={k}"
+            );
+        }
     }
 
     #[test]

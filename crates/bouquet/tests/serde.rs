@@ -1,6 +1,15 @@
-//! Round-trip tests for the serde implementation. Cover both a self-describing
-//! text format (JSON) and a compact binary format (CBOR) — the deserializer's
-//! visitor implementation has to handle both correctly.
+//! Round-trip tests for the serde implementation.
+//!
+//! Two visitor paths need coverage, because they are entirely separate code:
+//!
+//! - Self-describing formats (JSON, CBOR) drive `visit_map`.
+//! - Non-self-describing formats (bincode, postcard) drive `visit_seq` and
+//!   rely on the declared field order.
+//!
+//! The crate documented bincode support while implementing only `visit_map`,
+//! so serialization succeeded and deserialization always failed — a
+//! deployment persisting to a compact binary format wrote data it could
+//! never read back. These tests pin both directions.
 
 #![cfg(all(feature = "classical", feature = "serde"))]
 
@@ -48,6 +57,50 @@ fn cbor_round_trip_preserves_membership() {
     for i in 0..1_000u32 {
         assert!(g.contains(&i), "missing {i} after CBOR round trip");
     }
+}
+
+/// Non-self-describing: exercises `visit_seq`.
+#[test]
+fn postcard_round_trip_preserves_membership() {
+    let f = fixture();
+    let buf = postcard::to_allocvec(&f).expect("serialize");
+    let g: Filter<Classical> = postcard::from_bytes(&buf).expect("deserialize");
+
+    assert_eq!(g.num_bits(), f.num_bits());
+    assert_eq!(g.num_hashes(), f.num_hashes());
+    for i in 0..1_000u32 {
+        assert!(g.contains(&i), "missing {i} after postcard round trip");
+    }
+}
+
+/// The other non-self-describing format the module docs name.
+#[test]
+fn bincode_round_trip_preserves_membership() {
+    let f = fixture();
+    let buf = bincode::serialize(&f).expect("serialize");
+    let g: Filter<Classical> = bincode::deserialize(&buf).expect("deserialize");
+
+    assert_eq!(g.num_bits(), f.num_bits());
+    assert_eq!(g.num_hashes(), f.num_hashes());
+    for i in 0..1_000u32 {
+        assert!(g.contains(&i), "missing {i} after bincode round trip");
+    }
+}
+
+/// The layout guard has to hold on the `visit_seq` path too, not just
+/// `visit_map` — it is a separate function and could easily skip the check.
+#[cfg(feature = "blocked")]
+#[test]
+fn postcard_rejects_layout_mismatch() {
+    use bouquet::Blocked;
+
+    let f = fixture();
+    let buf = postcard::to_allocvec(&f).expect("serialize");
+    let r: Result<Filter<Blocked>, _> = postcard::from_bytes(&buf);
+    assert!(
+        r.is_err(),
+        "visit_seq must enforce the layout tag like visit_map does"
+    );
 }
 
 #[test]

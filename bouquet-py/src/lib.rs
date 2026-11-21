@@ -12,16 +12,56 @@
 // offending code is in expanded macros, not source we control.
 #![allow(clippy::useless_conversion)]
 
-use ::bouquet::{Atomic, Blocked, Classical, Filter};
-use pyo3::exceptions::PyValueError;
+use ::bouquet::{Atomic, Blocked, Classical, Error as BouquetError, Filter};
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyMemoryError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::{PyBackedBytes, PyBackedStr};
+use pyo3::types::{PyByteArray, PyBytes, PyString};
+use pyo3::Borrowed;
+
+/// Largest filter a binding call may request, in bits: 2^36 = 8 GiB.
+///
+/// Rust's global allocator calls `handle_alloc_error` on failure, which
+/// aborts the process — from Python that means the interpreter dies with
+/// SIGABRT and no traceback, which no `except` clause can catch. The core
+/// crate's `try_*` constructors turn *allocator* failure into a value, but a
+/// request this side of plausible can still make the OS OOM-killer step in
+/// before `malloc` ever returns null. So we refuse the absurd up front and
+/// use the fallible constructors for everything else.
+const MAX_BITS: usize = 1 << 36;
+
+/// Map a core-crate error onto the Python exception a caller would expect.
+fn map_bouquet_err(e: BouquetError) -> PyErr {
+    match e {
+        BouquetError::AllocationFailed { bits } => PyMemoryError::new_err(format!(
+            "could not allocate a {bits}-bit filter ({} GiB)",
+            bits / 8 / (1 << 30)
+        )),
+        BouquetError::CapacityOverflow { .. } => {
+            PyValueError::new_err(format!("filter size is too large to represent: {e}"))
+        }
+        BouquetError::InvalidHashes(k) => {
+            PyValueError::new_err(format!("hashes must be in 1..=1024, got {k}"))
+        }
+        // `bouquet::Error` is `#[non_exhaustive]`; anything new is still a
+        // validation failure, so ValueError is the right default.
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Input dispatch: accept bytes-like or str
 // ---------------------------------------------------------------------------
 
-/// Input for the single-item methods. PyO3 tries variants in order:
+fn item_type_error(obj: &Bound<'_, PyAny>) -> PyErr {
+    PyTypeError::new_err(format!(
+        "expected str or a bytes-like object (bytes, bytearray, memoryview), got {}",
+        obj.get_type()
+    ))
+}
+
+/// Input for the single-item methods. Extraction tries, in order:
 /// `Bytes` covers `bytes` and `bytearray` (zero-copy — `PyBackedBytes`
 /// keeps a Python reference); `Str` covers `str` (CPython's UTF-8 cache,
 /// zero-copy when already encoded); `Other` is the buffer-protocol
@@ -29,11 +69,38 @@ use pyo3::pybacked::{PyBackedBytes, PyBackedStr};
 /// since arbitrary buffer objects don't give us a stable borrow. All
 /// arms hash the same underlying bytes, so `f.insert("hello")` and
 /// `f.insert(b"hello")` produce identical filter state.
-#[derive(FromPyObject)]
+///
+/// Extraction is a manual impl rather than `#[derive(FromPyObject)]`
+/// because a derived `Vec<u8>` fallback arm also accepts arbitrary
+/// sequences of ints — `f.insert([104, 105])` would silently coerce to
+/// `b"hi"`. `PyBuffer` restricts the fallback to real buffer-protocol
+/// objects.
 enum BytesOrStr {
     Bytes(PyBackedBytes),
     Str(PyBackedStr),
     Other(Vec<u8>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for BytesOrStr {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let obj = &*obj;
+        if let Ok(b) = obj.extract::<PyBackedBytes>() {
+            return Ok(Self::Bytes(b));
+        }
+        // Dispatch `str` on its *type*, not on whether extraction succeeds.
+        // Extraction fails for a `str` holding a lone surrogate (routine
+        // from `os.fsdecode`, `surrogateescape` decoding, or `json.loads`
+        // of malformed input), and swallowing that error used to drop
+        // through to the buffer arm and report "expected str ..., got
+        // <class 'str'>". Let Python's own UnicodeEncodeError surface.
+        if obj.is_instance_of::<PyString>() {
+            return obj.extract::<PyBackedStr>().map(Self::Str);
+        }
+        let buf = PyBuffer::<u8>::get(obj).map_err(|_| item_type_error(obj))?;
+        Ok(Self::Other(buf.to_vec(obj.py())?))
+    }
 }
 
 impl BytesOrStr {
@@ -50,11 +117,26 @@ impl BytesOrStr {
 /// Owned variant used by `AtomicFilter.insert_many`, where the GIL is
 /// released for the duration of the loop. Items are extracted to owned
 /// `Vec<u8>` / `String` up front so the inserts can run without holding a
-/// Python reference across the GIL boundary.
-#[derive(FromPyObject)]
+/// Python reference across the GIL boundary. Like [`BytesOrStr`], the
+/// bytes arm is restricted to buffer-protocol objects so a list of ints
+/// is rejected instead of coerced.
 enum OwnedBytesOrStr {
     Bytes(Vec<u8>),
     Str(String),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for OwnedBytesOrStr {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let obj = &*obj;
+        // Type-dispatched for the same reason as `BytesOrStr`.
+        if obj.is_instance_of::<PyString>() {
+            return obj.extract::<String>().map(Self::Str);
+        }
+        let buf = PyBuffer::<u8>::get(obj).map_err(|_| item_type_error(obj))?;
+        Ok(Self::Bytes(buf.to_vec(obj.py())?))
+    }
 }
 
 impl OwnedBytesOrStr {
@@ -86,6 +168,55 @@ fn check_items(n: usize) -> PyResult<()> {
     Ok(())
 }
 
+/// Validate an explicit `num_bits` before it reaches the allocator.
+fn check_num_bits(num_bits: usize) -> PyResult<()> {
+    if num_bits == 0 {
+        return Err(PyValueError::new_err("num_bits must be > 0"));
+    }
+    if num_bits > MAX_BITS {
+        return Err(PyValueError::new_err(format!(
+            "num_bits must be <= {MAX_BITS} (2^36 bits = 8 GiB), got {num_bits}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an explicit `hashes` (`k`).
+///
+/// The core builder *panics* on an out-of-range `k`, and a panic crossing
+/// the FFI boundary becomes `pyo3_runtime.PanicException`, which derives
+/// from `BaseException` — so a caller's `except Exception:` does not catch
+/// it and the raw Rust panic message hits stderr. Check here instead.
+fn check_hashes(k: u32) -> PyResult<()> {
+    if k == 0 || k > 1024 {
+        return Err(PyValueError::new_err(format!(
+            "hashes must be in 1..=1024, got {k}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject an `expected_items`/`false_pos` pair whose implied size is beyond
+/// what we are willing to attempt.
+///
+/// Checked *before* construction, because the sizing math itself succeeds
+/// for values that would then ask the allocator for terabytes.
+fn check_implied_size(expected_items: usize, false_pos: f64) -> PyResult<()> {
+    let bits = ::bouquet::math::optimal_num_bits(expected_items, false_pos).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "expected_items={expected_items} at false_pos={false_pos} implies a filter \
+             size too large to represent"
+        ))
+    })?;
+    if bits > MAX_BITS {
+        return Err(PyValueError::new_err(format!(
+            "expected_items={expected_items} at false_pos={false_pos} implies a \
+             {bits}-bit filter, above the {MAX_BITS}-bit (8 GiB) ceiling"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ClassicalFilter
 // ---------------------------------------------------------------------------
@@ -95,7 +226,14 @@ fn check_items(n: usize) -> PyResult<()> {
 /// Construct with `ClassicalFilter.from_false_pos(fp, expected_items)` (or
 /// `.from_num_bits(...)`). Methods accept `bytes` / `bytearray` /
 /// `memoryview` or `str` (UTF-8 encoded).
-#[pyclass(name = "ClassicalFilter")]
+// `unsendable`: the underlying backend stores its words in `Cell`, so it
+// is `!Sync` by construction — that is the whole point of the
+// single-threaded backends. pyo3 requires `Sync` for a normal
+// `#[pyclass]` because free-threaded CPython can hand one object to two
+// threads at once; `unsendable` instead pins the object to the thread
+// that created it and raises if another thread touches it. Callers who
+// need cross-thread sharing want `AtomicFilter`.
+#[pyclass(name = "ClassicalFilter", unsendable)]
 struct ClassicalFilter {
     inner: Filter<Classical>,
 }
@@ -107,15 +245,16 @@ impl ClassicalFilter {
     /// one the OS RNG seeds the hasher.
     #[staticmethod]
     #[pyo3(signature = (false_pos, expected_items, *, seed=None))]
-    fn from_false_pos(false_pos: f64, expected_items: usize, seed: Option<u64>) -> PyResult<Self> {
+    fn from_false_pos(false_pos: f64, expected_items: usize, seed: Option<u128>) -> PyResult<Self> {
         check_fp(false_pos)?;
         check_items(expected_items)?;
+        check_implied_size(expected_items, false_pos)?;
+        let builder = Filter::<Classical>::with_false_pos(false_pos);
         let inner = match seed {
-            Some(s) => Filter::<Classical>::with_false_pos(false_pos)
-                .seed(s as u128)
-                .expected_items(expected_items),
-            None => Filter::<Classical>::with_false_pos(false_pos).expected_items(expected_items),
-        };
+            Some(s) => builder.seed(s).try_expected_items(expected_items),
+            None => builder.try_expected_items(expected_items),
+        }
+        .map_err(map_bouquet_err)?;
         Ok(Self { inner })
     }
 
@@ -127,11 +266,9 @@ impl ClassicalFilter {
         num_bits: usize,
         expected_items: Option<usize>,
         hashes: Option<u32>,
-        seed: Option<u64>,
+        seed: Option<u128>,
     ) -> PyResult<Self> {
-        if num_bits == 0 {
-            return Err(PyValueError::new_err("num_bits must be > 0"));
-        }
+        check_num_bits(num_bits)?;
         match (expected_items, hashes) {
             (Some(_), Some(_)) | (None, None) => Err(PyValueError::new_err(
                 "pass exactly one of expected_items or hashes",
@@ -140,17 +277,20 @@ impl ClassicalFilter {
                 check_items(n)?;
                 let builder = Filter::<Classical>::with_num_bits(num_bits);
                 let inner = match seed {
-                    Some(s) => builder.seed(s as u128).expected_items(n),
-                    None => builder.expected_items(n),
-                };
+                    Some(s) => builder.seed(s).try_expected_items(n),
+                    None => builder.try_expected_items(n),
+                }
+                .map_err(map_bouquet_err)?;
                 Ok(Self { inner })
             }
             (None, Some(k)) => {
+                check_hashes(k)?;
                 let builder = Filter::<Classical>::with_num_bits(num_bits);
                 let inner = match seed {
-                    Some(s) => builder.seed(s as u128).hashes(k),
-                    None => builder.hashes(k),
-                };
+                    Some(s) => builder.seed(s).try_hashes(k),
+                    None => builder.try_hashes(k),
+                }
+                .map_err(map_bouquet_err)?;
                 Ok(Self { inner })
             }
         }
@@ -179,9 +319,17 @@ impl ClassicalFilter {
         self.inner.clear();
     }
 
-    /// Estimated count of distinct items inserted.
+    /// Estimated count of distinct items inserted. Returns `2**64 - 1` on a
+    /// fully saturated filter; check `is_saturated()` first.
     fn estimate_count(&self) -> usize {
         self.inner.estimate_count()
+    }
+
+    /// Whether every bit is set. A saturated filter answers `True` to every
+    /// membership test, and `estimate_count()` returns `2**64 - 1` for it
+    /// because the estimator has no finite answer there.
+    fn is_saturated(&self) -> bool {
+        self.inner.is_saturated()
     }
 
     #[getter]
@@ -219,15 +367,16 @@ struct AtomicFilter {
 impl AtomicFilter {
     #[staticmethod]
     #[pyo3(signature = (false_pos, expected_items, *, seed=None))]
-    fn from_false_pos(false_pos: f64, expected_items: usize, seed: Option<u64>) -> PyResult<Self> {
+    fn from_false_pos(false_pos: f64, expected_items: usize, seed: Option<u128>) -> PyResult<Self> {
         check_fp(false_pos)?;
         check_items(expected_items)?;
+        check_implied_size(expected_items, false_pos)?;
+        let builder = Filter::<Atomic>::with_false_pos(false_pos);
         let inner = match seed {
-            Some(s) => Filter::<Atomic>::with_false_pos(false_pos)
-                .seed(s as u128)
-                .expected_items(expected_items),
-            None => Filter::<Atomic>::with_false_pos(false_pos).expected_items(expected_items),
-        };
+            Some(s) => builder.seed(s).try_expected_items(expected_items),
+            None => builder.try_expected_items(expected_items),
+        }
+        .map_err(map_bouquet_err)?;
         Ok(Self { inner })
     }
 
@@ -243,16 +392,36 @@ impl AtomicFilter {
         self.inner.contains(item.as_bytes())
     }
 
-    /// Bulk insert. Releases the GIL while running, so other Python threads
-    /// can make progress. Returns the number of items that were already
-    /// fully present (probable duplicates).
-    fn insert_many(&self, py: Python<'_>, items: Vec<OwnedBytesOrStr>) -> usize {
-        py.allow_threads(|| {
+    /// Bulk insert from a sequence (list or tuple) of items. Releases the
+    /// GIL while running, so other Python threads can make progress.
+    /// Returns the number of items that were already fully present
+    /// (probable duplicates).
+    ///
+    /// Note this takes a *sequence of items*, not a single item. Passing
+    /// `bytes` or `str` directly raises `TypeError` rather than iterating
+    /// it element-wise.
+    fn insert_many(&self, py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<usize> {
+        // A bytes-like or str argument would otherwise be iterated as a
+        // sequence — of ints for bytes, of 1-char strs for str — and report
+        // the baffling "expected str or a bytes-like object, got
+        // <class 'int'>" about an argument that *is* bytes-like.
+        if items.is_instance_of::<PyBytes>()
+            || items.is_instance_of::<PyByteArray>()
+            || items.is_instance_of::<PyString>()
+        {
+            return Err(PyTypeError::new_err(format!(
+                "insert_many expects a sequence of items, got a single {} — \
+                 wrap it in a list to insert one item",
+                items.get_type()
+            )));
+        }
+        let items: Vec<OwnedBytesOrStr> = items.extract()?;
+        Ok(py.detach(|| {
             items
                 .iter()
                 .filter(|item| self.inner.insert(item.as_bytes()))
                 .count()
-        })
+        }))
     }
 
     fn clear(&mut self) {
@@ -261,6 +430,13 @@ impl AtomicFilter {
 
     fn estimate_count(&self) -> usize {
         self.inner.estimate_count()
+    }
+
+    /// Whether every bit is set. A saturated filter answers `True` to every
+    /// membership test, and `estimate_count()` returns `2**64 - 1` for it
+    /// because the estimator has no finite answer there.
+    fn is_saturated(&self) -> bool {
+        self.inner.is_saturated()
     }
 
     #[getter]
@@ -289,7 +465,14 @@ impl AtomicFilter {
 /// Single-threaded Bloom filter with a 512-bit blocked layout. Faster
 /// `insert` at sizes that exceed L1 on x86; on Apple silicon the win is
 /// modest because the memory subsystem already hides scattered-miss latency.
-#[pyclass(name = "BlockedFilter")]
+// `unsendable`: the underlying backend stores its words in `Cell`, so it
+// is `!Sync` by construction — that is the whole point of the
+// single-threaded backends. pyo3 requires `Sync` for a normal
+// `#[pyclass]` because free-threaded CPython can hand one object to two
+// threads at once; `unsendable` instead pins the object to the thread
+// that created it and raises if another thread touches it. Callers who
+// need cross-thread sharing want `AtomicFilter`.
+#[pyclass(name = "BlockedFilter", unsendable)]
 struct BlockedFilter {
     inner: Filter<Blocked>,
 }
@@ -298,15 +481,16 @@ struct BlockedFilter {
 impl BlockedFilter {
     #[staticmethod]
     #[pyo3(signature = (false_pos, expected_items, *, seed=None))]
-    fn from_false_pos(false_pos: f64, expected_items: usize, seed: Option<u64>) -> PyResult<Self> {
+    fn from_false_pos(false_pos: f64, expected_items: usize, seed: Option<u128>) -> PyResult<Self> {
         check_fp(false_pos)?;
         check_items(expected_items)?;
+        check_implied_size(expected_items, false_pos)?;
+        let builder = Filter::<Blocked>::with_false_pos(false_pos);
         let inner = match seed {
-            Some(s) => Filter::<Blocked>::with_false_pos(false_pos)
-                .seed(s as u128)
-                .expected_items(expected_items),
-            None => Filter::<Blocked>::with_false_pos(false_pos).expected_items(expected_items),
-        };
+            Some(s) => builder.seed(s).try_expected_items(expected_items),
+            None => builder.try_expected_items(expected_items),
+        }
+        .map_err(map_bouquet_err)?;
         Ok(Self { inner })
     }
 
@@ -328,6 +512,13 @@ impl BlockedFilter {
 
     fn estimate_count(&self) -> usize {
         self.inner.estimate_count()
+    }
+
+    /// Whether every bit is set. A saturated filter answers `True` to every
+    /// membership test, and `estimate_count()` returns `2**64 - 1` for it
+    /// because the estimator has no finite answer there.
+    fn is_saturated(&self) -> bool {
+        self.inner.is_saturated()
     }
 
     #[getter]

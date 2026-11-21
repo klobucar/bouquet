@@ -7,6 +7,8 @@ followed by `pytest`.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 import bouquet
@@ -158,9 +160,178 @@ def test_rejects_unsupported_types():
     """Non-bytes/str inputs should raise a clear error rather than coerce."""
     f = bouquet.ClassicalFilter.from_false_pos(0.01, 100, seed=0)
     with pytest.raises((TypeError, ValueError)):
-        f.insert(42)
+        f.insert(42)  # ty: ignore[invalid-argument-type]  # deliberately wrong type
     with pytest.raises((TypeError, ValueError)):
-        f.insert(None)
+        f.insert(None)  # ty: ignore[invalid-argument-type]  # deliberately wrong type
+    # Sequences of ints must NOT silently coerce to bytes: [104, 105] is not
+    # b"hi". (A derived Vec<u8> fallback used to accept these.)
+    with pytest.raises(TypeError):
+        f.insert([104, 105])  # ty: ignore[invalid-argument-type]  # deliberately wrong type
+    with pytest.raises(TypeError):
+        f.insert((104, 105))  # ty: ignore[invalid-argument-type]  # deliberately wrong type
+
+
+def test_insert_many_rejects_int_sequences():
+    """The same no-coercion rule holds per item inside insert_many."""
+    f = bouquet.AtomicFilter.from_false_pos(0.01, 100, seed=0)
+    with pytest.raises(TypeError):
+        f.insert_many([[104, 105]])  # ty: ignore[invalid-argument-type]
+
+
+def test_seed_accepts_wide_ints():
+    """Seeds are full 128-bit values, matching the Rust API: a seed above
+    2**64 must be accepted, not OverflowError, and must be deterministic."""
+    big = (1 << 100) | 12345
+    a = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=big)
+    b = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=big)
+    for i in range(100):
+        a.insert(str(i))
+        b.insert(str(i))
+    for i in range(5_000, 6_000):
+        assert a.contains(str(i)) == b.contains(str(i))
+    with pytest.raises(OverflowError):
+        bouquet.ClassicalFilter.from_false_pos(0.01, 100, seed=1 << 128)
+
+
+def test_rejects_out_of_range_hashes():
+    """`hashes` used to reach a Rust `panic!`, surfacing as PanicException —
+    which inherits BaseException and so escapes `except Exception`."""
+    for k in (0, 1025, 2000, 2**31):
+        with pytest.raises(ValueError):
+            bouquet.ClassicalFilter.from_num_bits(1024, hashes=k)
+
+    # Specifically: catchable as Exception, not just BaseException — a
+    # PanicException would slip straight through this.
+    with pytest.raises(Exception):  # noqa: B017
+        bouquet.ClassicalFilter.from_num_bits(1024, hashes=0)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: bouquet.ClassicalFilter.from_num_bits(10**15, hashes=4),
+        lambda: bouquet.ClassicalFilter.from_false_pos(0.001, 10**13),
+        lambda: bouquet.AtomicFilter.from_false_pos(0.001, 10**13),
+        lambda: bouquet.BlockedFilter.from_false_pos(0.001, 10**13),
+        lambda: bouquet.ClassicalFilter.from_false_pos(1e-300, 10**18),
+        lambda: bouquet.ClassicalFilter.from_num_bits(2**64 - 1, hashes=4),
+    ],
+)
+def test_oversized_requests_raise_instead_of_killing_the_interpreter(call):
+    """These used to abort the process (SIGABRT) or SIGKILL it via the OOM
+    killer, with no traceback and nothing catchable. All three backends now
+    agree on refusing, and they refuse with a normal Python exception."""
+    with pytest.raises((ValueError, MemoryError, OverflowError)):
+        call()
+
+
+def test_surrogate_str_raises_unicode_error_not_a_confusing_type_error():
+    """A lone surrogate is a `str`, so 'expected str ..., got str' was both
+    wrong and unactionable. Lone surrogates arrive routinely from
+    os.fsdecode and surrogateescape-decoded filenames."""
+    f = bouquet.ClassicalFilter.from_false_pos(0.01, 100, seed=0)
+    with pytest.raises(UnicodeEncodeError):
+        f.insert("\ud800")
+    with pytest.raises(UnicodeEncodeError):
+        f.contains("\ud800")
+    with pytest.raises(UnicodeEncodeError):
+        "\ud800" in f  # noqa: B015
+
+
+def test_insert_many_rejects_a_bare_bytes_or_str():
+    """`insert_many(b"abc")` iterated the bytes as ints and complained that a
+    bytes-like object wasn't bytes-like."""
+    f = bouquet.AtomicFilter.from_false_pos(0.01, 100, seed=0)
+    for bad in (b"abc", bytearray(b"abc"), "abc"):
+        with pytest.raises(TypeError, match="sequence of items"):
+            f.insert_many(bad)  # ty: ignore[invalid-argument-type]
+
+    # The correct form still works.
+    assert f.insert_many([b"abc"]) == 0
+
+
+def test_estimate_count_saturation_is_flagged():
+    f = bouquet.ClassicalFilter.from_num_bits(64, hashes=1, seed=0)
+    assert not f.is_saturated()
+    for i in range(20_000):
+        f.insert(str(i))
+    assert f.is_saturated()
+    # The sentinel is documented rather than silently plausible.
+    assert f.estimate_count() == 2**64 - 1
+
+
+def test_blocked_reports_the_k_it_actually_uses():
+    """Blocked backends clamp k to the block budget; num_hashes must report
+    the clamped value rather than the request."""
+    f = bouquet.BlockedFilter.from_false_pos(1e-160, 1000, seed=1)
+    assert f.num_hashes <= 64
+    for i in range(1000):
+        f.insert(str(i))
+    hits = sum(1 for i in range(10_000, 20_000) if f.contains(str(i)))
+    # Unclamped, this configuration answered True for ~half of all queries.
+    assert hits / 10_000 < 0.01
+
+
+def test_single_threaded_filters_are_pinned_to_their_thread():
+    """`ClassicalFilter`/`BlockedFilter` wrap a `!Sync` backend. Sharing one
+    across threads must fail loudly rather than race."""
+    f = bouquet.ClassicalFilter.from_false_pos(0.01, 100, seed=0)
+    f.insert(b"x")
+    errors = []
+
+    def worker():
+        try:
+            f.insert(b"y")
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert errors, "expected cross-thread access to be refused"
+
+
+def test_atomic_filter_is_shareable_across_threads():
+    """...and the concurrent backend is the one that is not pinned."""
+    f = bouquet.AtomicFilter.from_false_pos(0.01, 10_000, seed=0)
+
+    def worker(lo):
+        for i in range(lo, lo + 1000):
+            f.insert(str(i))
+
+    threads = [threading.Thread(target=worker, args=(n * 1000,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    for i in range(4000):
+        assert f.contains(str(i)), f"lost {i}"
+
+
+def test_insert_many_releases_the_gil():
+    """The headline claim of the binding, made checkable: a spinner thread
+    must make real progress while insert_many runs."""
+    f = bouquet.AtomicFilter.from_false_pos(0.01, 2_000_000, seed=0)
+    items = [str(i).encode() for i in range(1_000_000)]
+
+    ticks = 0
+    stop = False
+
+    def spinner():
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+
+    t = threading.Thread(target=spinner)
+    t.start()
+    try:
+        f.insert_many(items)
+    finally:
+        stop = True
+        t.join()
+
+    assert ticks > 1000, f"spinner only advanced {ticks} times; GIL likely held"
 
 
 def test_repr_is_useful():

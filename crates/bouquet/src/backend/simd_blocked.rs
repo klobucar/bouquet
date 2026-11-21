@@ -9,7 +9,8 @@
 //!   the ARMv8 spec, so it is selected unconditionally on this target.
 //! - **x86_64 with `target-feature=+avx2`** (or `target-cpu=native` on any
 //!   recent x86 chip): 2× 256-bit AVX2 registers per block.
-//! - **everywhere else**: forwards to the scalar [`Blocked`] path.
+//! - **everywhere else**: forwards to the scalar [`super::blocked::Blocked`]
+//!   path.
 //!
 //! The x86_64 path uses *compile-time* feature detection
 //! (`cfg(target_feature = "avx2")`) rather than runtime detection — that
@@ -18,7 +19,7 @@
 //! `RUSTFLAGS="-C target-cpu=native"` or an explicit
 //! `RUSTFLAGS="-C target-feature=+avx2"`.
 //!
-//! AVX-512 is intentionally not implemented in v0.2 — the frequency
+//! AVX-512 is intentionally not implemented yet — the frequency
 //! throttling story on Intel client CPUs is too messy for a library to
 //! enable by default. A future revision can add it behind its own feature.
 //!
@@ -34,8 +35,8 @@
 use alloc::{boxed::Box, vec};
 use core::cell::Cell;
 
-use super::blocked::{block_index, in_block_double_hash, nth_in_block, BLOCK_BITS};
-use super::Backend;
+use super::blocked::{block_index, effective_k, BlockProbes, BLOCK_BITS};
+use super::{Backend, Layout};
 
 const BLOCK_WORDS: usize = BLOCK_BITS / 64;
 
@@ -63,29 +64,47 @@ impl Clone for SimdBlocked {
     }
 }
 
+/// Union of the `k` probe bits for `hash`, as a 512-bit block-shaped mask.
+///
+/// Uses the same `BlockProbes` stream and the same `effective_k` clamp as
+/// the scalar [`super::blocked::Blocked`] loops, which is what keeps the two
+/// backends bit-for-bit identical.
 #[inline(always)]
 fn build_mask(hash: u64, k: u32) -> [u64; BLOCK_WORDS] {
-    let (h1, h2) = in_block_double_hash(hash);
+    let mut probes = BlockProbes::new(hash);
+    let k = effective_k(k);
     let mut mask = [0u64; BLOCK_WORDS];
-    for i in 0..k {
-        let in_ix = nth_in_block(h1, h2, i) as usize;
+    for _ in 0..k {
+        let in_ix = probes.next_probe() as usize;
         mask[in_ix >> 6] |= 1u64 << (in_ix & 63);
     }
     mask
 }
 
 impl Backend for SimdBlocked {
+    const LAYOUT: Layout = Layout::Blocked512;
+
+    fn clamp_hashes(k: u32) -> u32 {
+        effective_k(k)
+    }
+
     fn with_capacity(num_bits: usize) -> Self {
-        debug_assert!(num_bits >= 64 && num_bits.is_multiple_of(64));
-        let snapped = num_bits.div_ceil(BLOCK_BITS) * BLOCK_BITS;
+        Self::try_with_capacity(num_bits).expect("SimdBlocked::with_capacity")
+    }
+
+    fn try_with_capacity(num_bits: usize) -> Result<Self, crate::Error> {
+        // See `Blocked::try_with_capacity`: round up unconditionally so a
+        // direct call with an arbitrary size cannot break the
+        // `get_unchecked` invariant in the hot loops.
+        let snapped = super::round_up_to(num_bits, BLOCK_BITS)?;
         let num_blocks = snapped / BLOCK_BITS;
         let words = snapped / 64;
-        let bits = vec![Cell::new(0u64); words].into_boxed_slice();
-        Self {
-            bits,
+        let bits = super::try_alloc_words(words, snapped, || Cell::new(0u64))?;
+        Ok(Self {
+            bits: bits.into_boxed_slice(),
             num_bits: snapped,
             num_blocks,
-        }
+        })
     }
 
     #[inline]
@@ -138,7 +157,7 @@ impl Backend for SimdBlocked {
 
     #[cfg(feature = "serde")]
     fn from_words(words: alloc::vec::Vec<u64>) -> Option<Self> {
-        if words.is_empty() || words.len() % BLOCK_WORDS != 0 {
+        if words.is_empty() || !words.len().is_multiple_of(BLOCK_WORDS) {
             return None;
         }
         let num_bits = words.len() * 64;
@@ -159,48 +178,80 @@ impl Backend for SimdBlocked {
 /// Selectors for the in-block hot path. One `dispatch_set` and one
 /// `dispatch_check` are compiled per target; an unused arch falls through
 /// to the scalar path.
-const _: () = (); // anchor for the cfg block below
-
+///
+/// # Safety
+///
+/// Every function in this section, and every arch backend it forwards to,
+/// shares one precondition: `block_ptr` must be valid for reads (and, for
+/// the `set` family, writes) of [`BLOCK_WORDS`] consecutive `u64` values,
+/// and properly aligned for `u64`.
+///
+/// `SimdBlocked` discharges this by construction: `with_capacity` rounds up
+/// to a whole number of blocks and floors at one, `from_words` rejects any
+/// word count that is not a multiple of `BLOCK_WORDS`, and the callers
+/// derive `word_offset` as `block * BLOCK_WORDS` with
+/// `block < num_blocks == bits.len() / BLOCK_WORDS`.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn dispatch_set(block_ptr: *mut u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-    neon::set(block_ptr, mask)
+    // SAFETY: precondition forwarded to the caller of `dispatch_set`.
+    unsafe { neon::set(block_ptr, mask) }
 }
 
+/// # Safety
+///
+/// See [`dispatch_set`].
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn dispatch_set(block_ptr: *mut u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-    avx2::set(block_ptr, mask)
+    // SAFETY: precondition forwarded to the caller of `dispatch_set`.
+    unsafe { avx2::set(block_ptr, mask) }
 }
 
+/// # Safety
+///
+/// See [`dispatch_set`].
 #[cfg(not(any(
     target_arch = "aarch64",
     all(target_arch = "x86_64", target_feature = "avx2"),
 )))]
 #[inline]
 unsafe fn dispatch_set(block_ptr: *mut u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-    scalar::set(block_ptr, mask)
+    // SAFETY: precondition forwarded to the caller of `dispatch_set`.
+    unsafe { scalar::set(block_ptr, mask) }
 }
 
+/// # Safety
+///
+/// See [`dispatch_set`]; `block_ptr` need only be valid for reads.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn dispatch_check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-    neon::check(block_ptr, mask)
+    // SAFETY: precondition forwarded to the caller of `dispatch_check`.
+    unsafe { neon::check(block_ptr, mask) }
 }
 
+/// # Safety
+///
+/// See [`dispatch_check`].
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn dispatch_check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-    avx2::check(block_ptr, mask)
+    // SAFETY: precondition forwarded to the caller of `dispatch_check`.
+    unsafe { avx2::check(block_ptr, mask) }
 }
 
+/// # Safety
+///
+/// See [`dispatch_check`].
 #[cfg(not(any(
     target_arch = "aarch64",
     all(target_arch = "x86_64", target_feature = "avx2"),
 )))]
 #[inline]
 unsafe fn dispatch_check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-    scalar::check(block_ptr, mask)
+    // SAFETY: precondition forwarded to the caller of `dispatch_check`.
+    unsafe { scalar::check(block_ptr, mask) }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,32 +265,48 @@ unsafe fn dispatch_check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bo
 mod scalar {
     use super::BLOCK_WORDS;
 
+    /// # Safety
+    ///
+    /// `block_ptr` must be valid for reads and writes of [`BLOCK_WORDS`]
+    /// consecutive `u64`s and aligned for `u64`.
     #[inline]
     pub(super) unsafe fn set(block_ptr: *mut u64, mask: &[u64; BLOCK_WORDS]) -> bool {
         let mut all_set = true;
         for i in 0..BLOCK_WORDS {
-            let m = *mask.get_unchecked(i);
+            // SAFETY: `i < BLOCK_WORDS` and `mask` has exactly that length.
+            let m = unsafe { *mask.get_unchecked(i) };
             if m == 0 {
                 continue;
             }
-            let p = block_ptr.add(i);
-            let cur = *p;
-            if cur & m != m {
-                all_set = false;
+            // SAFETY: `i < BLOCK_WORDS`, and the caller guarantees
+            // `block_ptr` covers that many writable `u64`s.
+            unsafe {
+                let p = block_ptr.add(i);
+                let cur = *p;
+                if cur & m != m {
+                    all_set = false;
+                }
+                *p = cur | m;
             }
-            *p = cur | m;
         }
         all_set
     }
 
+    /// # Safety
+    ///
+    /// `block_ptr` must be valid for reads of [`BLOCK_WORDS`] consecutive
+    /// `u64`s and aligned for `u64`.
     #[inline]
     pub(super) unsafe fn check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bool {
         for i in 0..BLOCK_WORDS {
-            let m = *mask.get_unchecked(i);
+            // SAFETY: `i < BLOCK_WORDS` and `mask` has exactly that length.
+            let m = unsafe { *mask.get_unchecked(i) };
             if m == 0 {
                 continue;
             }
-            let cur = *block_ptr.add(i);
+            // SAFETY: `i < BLOCK_WORDS`, and the caller guarantees
+            // `block_ptr` covers that many readable `u64`s.
+            let cur = unsafe { *block_ptr.add(i) };
             if cur & m != m {
                 return false;
             }
@@ -257,61 +324,79 @@ mod neon {
     use super::BLOCK_WORDS;
     use core::arch::aarch64::*;
 
+    /// # Safety
+    ///
+    /// `block_ptr` must be valid for reads and writes of [`BLOCK_WORDS`]
+    /// consecutive `u64`s and aligned for `u64`. NEON is mandatory in the
+    /// ARMv8 spec, so no target-feature check is needed on this target.
     #[inline]
     pub(super) unsafe fn set(block_ptr: *mut u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-        let mp = mask.as_ptr();
-        let m0 = vld1q_u64(mp);
-        let m1 = vld1q_u64(mp.add(2));
-        let m2 = vld1q_u64(mp.add(4));
-        let m3 = vld1q_u64(mp.add(6));
+        // SAFETY: `mask` is a `[u64; 8]`, so lanes 0..8 are in bounds; the
+        // caller guarantees `block_ptr` covers 8 readable+writable `u64`s.
+        // The intrinsics are unaligned loads/stores, so `u64` alignment is
+        // more than sufficient.
+        unsafe {
+            let mp = mask.as_ptr();
+            let m0 = vld1q_u64(mp);
+            let m1 = vld1q_u64(mp.add(2));
+            let m2 = vld1q_u64(mp.add(4));
+            let m3 = vld1q_u64(mp.add(6));
 
-        let b0 = vld1q_u64(block_ptr);
-        let b1 = vld1q_u64(block_ptr.add(2));
-        let b2 = vld1q_u64(block_ptr.add(4));
-        let b3 = vld1q_u64(block_ptr.add(6));
+            let b0 = vld1q_u64(block_ptr);
+            let b1 = vld1q_u64(block_ptr.add(2));
+            let b2 = vld1q_u64(block_ptr.add(4));
+            let b3 = vld1q_u64(block_ptr.add(6));
 
-        // (b & m) == m  per lane → all-1s if every required bit was set.
-        let eq0 = vceqq_u64(vandq_u64(b0, m0), m0);
-        let eq1 = vceqq_u64(vandq_u64(b1, m1), m1);
-        let eq2 = vceqq_u64(vandq_u64(b2, m2), m2);
-        let eq3 = vceqq_u64(vandq_u64(b3, m3), m3);
+            // (b & m) == m  per lane → all-1s if every required bit was set.
+            let eq0 = vceqq_u64(vandq_u64(b0, m0), m0);
+            let eq1 = vceqq_u64(vandq_u64(b1, m1), m1);
+            let eq2 = vceqq_u64(vandq_u64(b2, m2), m2);
+            let eq3 = vceqq_u64(vandq_u64(b3, m3), m3);
 
-        let combined = vandq_u64(vandq_u64(eq0, eq1), vandq_u64(eq2, eq3));
-        let lo = vgetq_lane_u64(combined, 0);
-        let hi = vgetq_lane_u64(combined, 1);
-        let all_set = (lo & hi) == u64::MAX;
+            let combined = vandq_u64(vandq_u64(eq0, eq1), vandq_u64(eq2, eq3));
+            let lo = vgetq_lane_u64(combined, 0);
+            let hi = vgetq_lane_u64(combined, 1);
+            let all_set = (lo & hi) == u64::MAX;
 
-        // Always store the OR; if some bits weren't set we set them now.
-        vst1q_u64(block_ptr, vorrq_u64(b0, m0));
-        vst1q_u64(block_ptr.add(2), vorrq_u64(b1, m1));
-        vst1q_u64(block_ptr.add(4), vorrq_u64(b2, m2));
-        vst1q_u64(block_ptr.add(6), vorrq_u64(b3, m3));
+            // Always store the OR; if some bits weren't set we set them now.
+            vst1q_u64(block_ptr, vorrq_u64(b0, m0));
+            vst1q_u64(block_ptr.add(2), vorrq_u64(b1, m1));
+            vst1q_u64(block_ptr.add(4), vorrq_u64(b2, m2));
+            vst1q_u64(block_ptr.add(6), vorrq_u64(b3, m3));
 
-        all_set
+            all_set
+        }
     }
 
+    /// # Safety
+    ///
+    /// `block_ptr` must be valid for reads of [`BLOCK_WORDS`] consecutive
+    /// `u64`s and aligned for `u64`.
     #[inline]
     pub(super) unsafe fn check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-        let mp = mask.as_ptr();
-        let m0 = vld1q_u64(mp);
-        let m1 = vld1q_u64(mp.add(2));
-        let m2 = vld1q_u64(mp.add(4));
-        let m3 = vld1q_u64(mp.add(6));
+        // SAFETY: as in `set`, minus the stores.
+        unsafe {
+            let mp = mask.as_ptr();
+            let m0 = vld1q_u64(mp);
+            let m1 = vld1q_u64(mp.add(2));
+            let m2 = vld1q_u64(mp.add(4));
+            let m3 = vld1q_u64(mp.add(6));
 
-        let b0 = vld1q_u64(block_ptr);
-        let b1 = vld1q_u64(block_ptr.add(2));
-        let b2 = vld1q_u64(block_ptr.add(4));
-        let b3 = vld1q_u64(block_ptr.add(6));
+            let b0 = vld1q_u64(block_ptr);
+            let b1 = vld1q_u64(block_ptr.add(2));
+            let b2 = vld1q_u64(block_ptr.add(4));
+            let b3 = vld1q_u64(block_ptr.add(6));
 
-        let eq0 = vceqq_u64(vandq_u64(b0, m0), m0);
-        let eq1 = vceqq_u64(vandq_u64(b1, m1), m1);
-        let eq2 = vceqq_u64(vandq_u64(b2, m2), m2);
-        let eq3 = vceqq_u64(vandq_u64(b3, m3), m3);
+            let eq0 = vceqq_u64(vandq_u64(b0, m0), m0);
+            let eq1 = vceqq_u64(vandq_u64(b1, m1), m1);
+            let eq2 = vceqq_u64(vandq_u64(b2, m2), m2);
+            let eq3 = vceqq_u64(vandq_u64(b3, m3), m3);
 
-        let combined = vandq_u64(vandq_u64(eq0, eq1), vandq_u64(eq2, eq3));
-        let lo = vgetq_lane_u64(combined, 0);
-        let hi = vgetq_lane_u64(combined, 1);
-        (lo & hi) == u64::MAX
+            let combined = vandq_u64(vandq_u64(eq0, eq1), vandq_u64(eq2, eq3));
+            let lo = vgetq_lane_u64(combined, 0);
+            let hi = vgetq_lane_u64(combined, 1);
+            (lo & hi) == u64::MAX
+        }
     }
 }
 
@@ -324,46 +409,64 @@ mod avx2 {
     use super::BLOCK_WORDS;
     use core::arch::x86_64::*;
 
+    /// # Safety
+    ///
+    /// `block_ptr` must be valid for reads and writes of [`BLOCK_WORDS`]
+    /// consecutive `u64`s and aligned for `u64`. The module is gated on
+    /// `target_feature = "avx2"`, so AVX2 availability is a compile-time
+    /// guarantee rather than a caller obligation.
     #[inline]
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn set(block_ptr: *mut u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-        let mp = mask.as_ptr() as *const __m256i;
-        let m0 = _mm256_loadu_si256(mp);
-        let m1 = _mm256_loadu_si256(mp.add(1));
+        // SAFETY: `mask` is a `[u64; 8]` = 2× `__m256i`; the caller
+        // guarantees `block_ptr` covers 8 readable+writable `u64`s, also
+        // 2× `__m256i`. All loads/stores here are the unaligned forms.
+        unsafe {
+            let mp = mask.as_ptr() as *const __m256i;
+            let m0 = _mm256_loadu_si256(mp);
+            let m1 = _mm256_loadu_si256(mp.add(1));
 
-        let bp = block_ptr as *mut __m256i;
-        let b0 = _mm256_loadu_si256(bp as *const __m256i);
-        let b1 = _mm256_loadu_si256((bp as *const __m256i).add(1));
+            let bp = block_ptr as *mut __m256i;
+            let b0 = _mm256_loadu_si256(bp as *const __m256i);
+            let b1 = _mm256_loadu_si256((bp as *const __m256i).add(1));
 
-        let eq0 = _mm256_cmpeq_epi64(_mm256_and_si256(b0, m0), m0);
-        let eq1 = _mm256_cmpeq_epi64(_mm256_and_si256(b1, m1), m1);
+            let eq0 = _mm256_cmpeq_epi64(_mm256_and_si256(b0, m0), m0);
+            let eq1 = _mm256_cmpeq_epi64(_mm256_and_si256(b1, m1), m1);
 
-        let combined = _mm256_and_si256(eq0, eq1);
-        let bits = _mm256_movemask_epi8(combined);
-        let all_set = bits == -1i32;
+            let combined = _mm256_and_si256(eq0, eq1);
+            let bits = _mm256_movemask_epi8(combined);
+            let all_set = bits == -1i32;
 
-        _mm256_storeu_si256(bp, _mm256_or_si256(b0, m0));
-        _mm256_storeu_si256(bp.add(1), _mm256_or_si256(b1, m1));
+            _mm256_storeu_si256(bp, _mm256_or_si256(b0, m0));
+            _mm256_storeu_si256(bp.add(1), _mm256_or_si256(b1, m1));
 
-        all_set
+            all_set
+        }
     }
 
+    /// # Safety
+    ///
+    /// `block_ptr` must be valid for reads of [`BLOCK_WORDS`] consecutive
+    /// `u64`s and aligned for `u64`.
     #[inline]
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn check(block_ptr: *const u64, mask: &[u64; BLOCK_WORDS]) -> bool {
-        let mp = mask.as_ptr() as *const __m256i;
-        let m0 = _mm256_loadu_si256(mp);
-        let m1 = _mm256_loadu_si256(mp.add(1));
+        // SAFETY: as in `set`, minus the stores.
+        unsafe {
+            let mp = mask.as_ptr() as *const __m256i;
+            let m0 = _mm256_loadu_si256(mp);
+            let m1 = _mm256_loadu_si256(mp.add(1));
 
-        let bp = block_ptr as *const __m256i;
-        let b0 = _mm256_loadu_si256(bp);
-        let b1 = _mm256_loadu_si256(bp.add(1));
+            let bp = block_ptr as *const __m256i;
+            let b0 = _mm256_loadu_si256(bp);
+            let b1 = _mm256_loadu_si256(bp.add(1));
 
-        let eq0 = _mm256_cmpeq_epi64(_mm256_and_si256(b0, m0), m0);
-        let eq1 = _mm256_cmpeq_epi64(_mm256_and_si256(b1, m1), m1);
+            let eq0 = _mm256_cmpeq_epi64(_mm256_and_si256(b0, m0), m0);
+            let eq1 = _mm256_cmpeq_epi64(_mm256_and_si256(b1, m1), m1);
 
-        let combined = _mm256_and_si256(eq0, eq1);
-        _mm256_movemask_epi8(combined) == -1i32
+            let combined = _mm256_and_si256(eq0, eq1);
+            _mm256_movemask_epi8(combined) == -1i32
+        }
     }
 }
 
@@ -428,6 +531,12 @@ mod tests {
                 "check diverged at i={i} h={h:#x}"
             );
         }
+    }
+
+    #[test]
+    fn with_capacity_floors_at_one_block() {
+        assert_eq!(SimdBlocked::with_capacity(0).num_bits(), BLOCK_BITS);
+        assert_eq!(SimdBlocked::with_capacity(64).num_bits(), BLOCK_BITS);
     }
 
     #[test]

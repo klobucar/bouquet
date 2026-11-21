@@ -22,6 +22,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
+// `unsafe fn` bodies do not get an implicit unsafe block. This is the
+// edition-2024 behaviour; opting in early keeps every unsafe operation
+// paired with the SAFETY comment that justifies it.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
@@ -203,8 +207,25 @@ impl<B: Backend, S: BuildHasher> Filter<B, S> {
         self.backend.clear();
     }
 
+    /// Returns whether every bit in the filter is set.
+    ///
+    /// A saturated filter answers `true` to every [`Self::contains`] query
+    /// and its [`Self::estimate_count`] is meaningless. Worth checking
+    /// before trusting an estimate from a filter you did not size yourself
+    /// — for instance one that arrived over the wire.
+    pub fn is_saturated(&self) -> bool {
+        self.backend.count_ones() >= self.backend.num_bits()
+    }
+
     /// Estimate the number of distinct items inserted, from the popcount of
     /// the underlying bit vector. Accuracy degrades as the filter saturates.
+    ///
+    /// Returns [`usize::MAX`] as a sentinel when the filter is fully
+    /// saturated — the estimator's `ln(1 - x/m)` term diverges there, so
+    /// there is no finite answer to give. Check [`Self::is_saturated`]
+    /// first if you intend to do arithmetic on the result; in particular,
+    /// feeding it straight to `Vec::with_capacity` will abort the process
+    /// on a saturated filter.
     pub fn estimate_count(&self) -> usize {
         let m = self.backend.num_bits() as f64;
         let k = self.num_hashes as f64;
@@ -265,10 +286,11 @@ impl<B: Backend, S: BuildHasher> WithFalsePos<B, S> {
     /// Finish the build. Sizes the filter for `expected_items` items at the
     /// false-positive rate set on the builder.
     ///
-    /// Panics if `expected_items == 0`.
+    /// Panics if `expected_items == 0`, or if the computed size overflows
+    /// `usize` (only reachable with astronomically large `expected_items`).
     pub fn expected_items(self, expected_items: usize) -> Filter<B, S> {
         let num_bits = math::optimal_num_bits(expected_items, self.fp)
-            .expect("expected_items must be > 0 and fp must be in (0, 1)");
+            .expect("expected_items must be > 0 and the computed filter size must fit in usize");
         let num_hashes = math::optimal_num_hashes(num_bits, expected_items)
             .expect("optimal_num_hashes failed despite valid inputs");
         Filter::from_parts(num_bits, num_hashes, self.hasher)
@@ -277,6 +299,24 @@ impl<B: Backend, S: BuildHasher> WithFalsePos<B, S> {
     /// Alias for [`Self::expected_items`].
     pub fn items(self, items: usize) -> Filter<B, S> {
         self.expected_items(items)
+    }
+
+    /// Fallible [`Self::expected_items`].
+    ///
+    /// Prefer this whenever `expected_items` comes from outside the program
+    /// — a request parameter, a config file, a language binding. The
+    /// infallible form panics on a size that overflows and *aborts the
+    /// process* on a size the allocator cannot satisfy.
+    pub fn try_expected_items(self, expected_items: usize) -> Result<Filter<B, S>, Error> {
+        let num_bits =
+            math::optimal_num_bits(expected_items, self.fp).ok_or(Error::CapacityOverflow {
+                requested_bits: expected_items,
+            })?;
+        let num_hashes =
+            math::optimal_num_hashes(num_bits, expected_items).ok_or(Error::CapacityOverflow {
+                requested_bits: num_bits,
+            })?;
+        Filter::try_from_parts(num_bits, num_hashes, self.hasher)
     }
 }
 
@@ -326,12 +366,37 @@ impl<B: Backend, S: BuildHasher> WithNumBits<B, S> {
 
     /// Finish the build with an explicit number of hash functions.
     ///
+    /// Note that blocked backends clamp `k` to
+    /// [`backend::blocked::MAX_BLOCK_HASHES`]; [`Filter::num_hashes`]
+    /// reports the clamped value.
+    ///
     /// Panics if `k == 0` or `k > MAX_HASHES`.
     pub fn hashes(self, k: u32) -> Filter<B, S> {
         if k == 0 || k > MAX_HASHES {
             panic!("hashes: k must be in 1..={MAX_HASHES}, got {k}");
         }
         Filter::from_parts(self.num_bits, k, self.hasher)
+    }
+
+    /// Fallible [`Self::expected_items`]. See
+    /// [`WithFalsePos::try_expected_items`] for when to prefer it.
+    pub fn try_expected_items(self, expected_items: usize) -> Result<Filter<B, S>, Error> {
+        let num_hashes = math::optimal_num_hashes(self.num_bits, expected_items).ok_or(
+            Error::CapacityOverflow {
+                requested_bits: self.num_bits,
+            },
+        )?;
+        Filter::try_from_parts(self.num_bits, num_hashes, self.hasher)
+    }
+
+    /// Fallible [`Self::hashes`]: returns [`Error::InvalidHashes`] instead
+    /// of panicking on an out-of-range `k`, and reports allocation failure
+    /// instead of aborting.
+    pub fn try_hashes(self, k: u32) -> Result<Filter<B, S>, Error> {
+        if k == 0 || k > MAX_HASHES {
+            return Err(Error::InvalidHashes(k));
+        }
+        Filter::try_from_parts(self.num_bits, k, self.hasher)
     }
 }
 
@@ -354,11 +419,30 @@ impl<B: Backend, S: BuildHasher> Filter<B, S> {
     pub(crate) fn from_parts(num_bits: usize, num_hashes: u32, hasher: S) -> Self {
         debug_assert!(num_bits >= MIN_BITS && num_bits.is_multiple_of(64));
         debug_assert!((1..=MAX_HASHES).contains(&num_hashes));
+        // Clamp once, here, so `num_hashes()` reports the `k` the probe
+        // loops will actually run. Blocked backends cap this well below
+        // `MAX_HASHES`; see `backend::Backend::clamp_hashes`.
+        let num_hashes = B::clamp_hashes(num_hashes);
         Self {
             backend: B::with_capacity(num_bits),
             hasher,
             num_hashes,
         }
+    }
+
+    /// Fallible [`Self::from_parts`]. Propagates capacity overflow and
+    /// allocation failure instead of panicking / aborting.
+    pub(crate) fn try_from_parts(
+        num_bits: usize,
+        num_hashes: u32,
+        hasher: S,
+    ) -> Result<Self, Error> {
+        let num_hashes = B::clamp_hashes(num_hashes);
+        Ok(Self {
+            backend: B::try_with_capacity(num_bits)?,
+            hasher,
+            num_hashes,
+        })
     }
 
     /// Reconstruct from raw parts. Used by the `serde` deserializer after it
@@ -374,7 +458,10 @@ impl<B: Backend, S: BuildHasher> Filter<B, S> {
 }
 
 fn round_up_bits(num_bits: usize) -> usize {
-    let snapped = num_bits.div_ceil(64) * 64;
+    let snapped = num_bits
+        .div_ceil(64)
+        .checked_mul(64)
+        .expect("with_num_bits: num_bits too large to round up to a word");
     snapped.max(MIN_BITS)
 }
 
@@ -384,7 +471,11 @@ fn round_up_bits(num_bits: usize) -> usize {
 
 /// Errors returned from validated entry points (currently only the `serde`
 /// deserializer).
+///
+/// Marked `#[non_exhaustive]`: new validation rules add variants, and that
+/// should not be a breaking change for downstream `match`es.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// Filter has zero bits.
     EmptyBits,
@@ -396,6 +487,35 @@ pub enum Error {
         claimed: usize,
         /// Bit count derived from the word array length.
         derived: usize,
+    },
+    /// `bits` length is not valid for the backend's layout (e.g. a blocked
+    /// backend requires a whole number of 512-bit blocks).
+    InvalidWordCount(usize),
+    /// The requested size cannot be rounded up to the backend's layout
+    /// granularity without overflowing `usize`.
+    CapacityOverflow {
+        /// Bit count that was requested.
+        requested_bits: usize,
+    },
+    /// The allocator could not provide storage for a filter this large.
+    ///
+    /// Returned by the `try_*` constructors. The infallible constructors
+    /// abort the process instead, because Rust's global allocator calls
+    /// `handle_alloc_error` on failure — use the `try_*` forms whenever the
+    /// size is derived from untrusted input.
+    AllocationFailed {
+        /// Bit count whose allocation failed.
+        bits: usize,
+    },
+    /// The serialized filter was written by a backend with a different bit
+    /// layout or probe scheme — for example a `Filter<Classical>` blob being
+    /// loaded as a `Filter<Blocked>`. Loading it anyway would produce false
+    /// negatives, so it is rejected. See [`backend::Layout`].
+    LayoutMismatch {
+        /// Layout tag the target backend expects.
+        expected: &'static str,
+        /// Layout tag found in the serialized form.
+        found: alloc::string::String,
     },
 }
 
@@ -411,6 +531,23 @@ impl fmt::Display for Error {
             Error::InconsistentNumBits { claimed, derived } => write!(
                 f,
                 "num_bits ({claimed}) does not match bits.len() * 64 ({derived})",
+            ),
+            Error::InvalidWordCount(words) => write!(
+                f,
+                "bits length ({words} words) is not valid for this backend's layout",
+            ),
+            Error::CapacityOverflow { requested_bits } => write!(
+                f,
+                "requested filter size ({requested_bits} bits) overflows usize when rounded \
+                 up to the backend's layout granularity",
+            ),
+            Error::AllocationFailed { bits } => {
+                write!(f, "could not allocate storage for a {bits}-bit filter",)
+            }
+            Error::LayoutMismatch { expected, found } => write!(
+                f,
+                "filter was serialized with layout '{found}' but this backend uses '{expected}'; \
+                 loading it would produce false negatives",
             ),
         }
     }
