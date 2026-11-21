@@ -73,17 +73,8 @@ jobs:
       # before the upload, not after.
       - name: verify tag matches Cargo.toml version
         if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          set -euo pipefail
-          manifest="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "bouquet") | .version')"
-          tag="${GITHUB_REF_NAME#v}"
-          echo "Cargo.toml: $manifest"
-          echo "git tag:    $tag"
-          if [ "$manifest" != "$tag" ]; then
-            echo "::error::tag v$tag does not match Cargo.toml version $manifest"
-            exit 1
-          fi
+        # Logic and tests live in .github/scripts (run by the CI workflow).
+        run: .github/scripts/check-tag-version.sh "$GITHUB_REF_NAME" v bouquet
 
       # `--locked` so the published build resolves exactly what CI tested.
       - name: package (verifies the crate builds from its own tarball)
