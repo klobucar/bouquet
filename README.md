@@ -21,9 +21,6 @@
   <img src="https://img.shields.io/badge/MSRV-1.95-blue.svg" alt="MSRV 1.95">
 </p>
 
-Maintainer release setup for crates.io and PyPI, including trusted publishing
-through OIDC, is documented in [`RELEASING.md`](./RELEASING.md).
-
 A Bloom filter library where the storage layout and concurrency model are
 *pluggable backends* behind a single ergonomic API. You pick the arrangement
 you want; only that backend is compiled in.
