@@ -1,0 +1,160 @@
+name: Release wheels
+
+# Builds ABI3 wheels for `bouquet-bloom` and publishes them to PyPI via
+# Trusted Publishing (OIDC) — no API token in repository secrets.
+#
+# ONE-TIME SETUP: unlike crates.io, PyPI supports *pending* publishers, so
+# this can be configured before the project exists. Under PyPI -> Your
+# projects -> Publishing -> Add a pending publisher:
+#
+#     PyPI project name: bouquet-bloom
+#     Owner:             klobucar
+#     Repository:        bouquet
+#     Workflow name:     release-wheels.yml
+#     Environment:       release
+#
+# The first tagged run then creates the project. No manual first upload
+# needed (that constraint applies to crates.io, not here).
+#
+# Tag convention: `py-v*` (e.g. py-v0.1.0). The Rust crate uses bare `v*`
+# so the two can version independently.
+
+on:
+  push:
+    tags: ["py-v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build wheels but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# A second run for the same ref (re-pushed tag, double-clicked dispatch) must
+# queue, never race: releases are immutable and cannot be retried.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# NOTE: no workflow-level `defaults.run.working-directory`. maturin-action
+# takes an explicit `working-directory`, and upload/download-artifact paths
+# resolve against the workspace root regardless — mixing the two is how you
+# end up with an empty `dist`.
+
+jobs:
+  # Guard the whole pipeline before spending ~6 runners on wheel builds.
+  check-version:
+    name: verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pyproject.toml declares `dynamic = ["version"]`, so bouquet-py's
+      # Cargo.toml is the single source the wheel version comes from.
+      - name: compare
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          manifest="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "bouquet-py") | .version')"
+          tag="${GITHUB_REF_NAME#py-v}"
+          echo "Cargo.toml: $manifest"
+          echo "git tag:    $tag"
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag py-v$tag does not match bouquet-py version $manifest"
+            exit 1
+          fi
+
+  build:
+    name: wheel (${{ matrix.platform.os }} ${{ matrix.platform.target }})
+    needs: check-version
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # abi3-py311 means ONE wheel covers every CPython 3.11+, so the
+        # matrix is per (OS, arch) only — not per interpreter version.
+        platform:
+          - { os: ubuntu-latest,  target: x86_64,  manylinux: auto }
+          - { os: ubuntu-latest,  target: aarch64, manylinux: auto }
+          # `manylinux` is Linux-only; maturin-action ignores it elsewhere.
+          - { os: macos-latest,   target: x86_64,  manylinux: "" }
+          - { os: macos-latest,   target: aarch64, manylinux: "" }
+          - { os: windows-latest, target: x64,     manylinux: "" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          working-directory: bouquet-py
+          # --locked so the wheel is built from the resolved dependency set
+          # CI tested, not whatever floats at build time.
+          args: --release --out dist --locked
+          # Deliberately off. Cache entries are writable by any branch/PR
+          # workflow, so a poisoned entry restored here would be compiled
+          # into a wheel that PyPI then serves immutably. Releases are rare;
+          # eat the cold build. (zizmor: cache-poisoning)
+          sccache: "false"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: bouquet-py/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # maturin vendors the `bouquet` path dependency into the sdist, so it
+      # stays buildable outside this workspace.
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          working-directory: bouquet-py
+          args: --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdist
+          path: bouquet-py/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: [build, sdist]
+    # workflow_dispatch is rehearsal-only; never publish an untagged ref.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Read-only: this job never touches the repo contents.
+      contents: read
+      # Mints the OIDC token gh-action-pypi-publish trades for an upload token.
+      id-token: write
+    steps:
+      # Only wheel-* and sdist artifacts exist in this run, so take them all
+      # and flatten into one directory for the uploader.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: show what will be uploaded
+        run: ls -la dist
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        with:
+          packages-dir: dist
+          # Refuse to overwrite: PyPI uploads are immutable, and a silent
+          # skip on a version collision hides a botched release.
+          skip-existing: false

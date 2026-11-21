@@ -1,0 +1,20 @@
+# zizmor configuration — https://docs.zizmor.sh
+#
+# Run locally with:  uvx zizmor .github/workflows/
+
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Everything else must be pinned to a full commit SHA, with the
+        # human-readable tag in a trailing comment. Dependabot updates both.
+        "*": hash-pin
+
+        # dtolnay/rust-toolchain is the one deliberate exception. For this
+        # action the `@rev` *is* the toolchain selector — `@stable`,
+        # `@nightly`, `@1.95.0` each install a different Rust. SHA-pinning it
+        # would resolve against `master`, which selects no toolchain at all,
+        # forcing every call site to duplicate the version in a `toolchain:`
+        # input and making the MSRV job's real pin invisible at a glance.
+        # Ref-pinning here is the upstream-documented usage.
+        dtolnay/rust-toolchain: ref-pin

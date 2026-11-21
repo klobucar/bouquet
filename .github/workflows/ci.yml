@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege by default. No job here writes to the repo; a job that
+# needs more should ask for it locally rather than widening this.
+permissions:
+  contents: read
+
+# Superseded pushes to the same ref stop burning runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -14,7 +24,9 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -34,11 +46,13 @@ jobs:
           - "blocked,simd"
           - "loom,atomic"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: clippy (rust core)
         env:
           FEATURES: ${{ matrix.features }}
@@ -48,14 +62,16 @@ jobs:
     name: clippy (bouquet-py)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo clippy -p bouquet-py --all-targets
 
   test:
@@ -72,22 +88,145 @@ jobs:
           - profile: nostd-classical
             flags: "--no-default-features --features classical"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: cargo test
         env:
           FLAGS: ${{ matrix.flags }}
-        run: cargo test -p bouquet $FLAGS
+        run: |
+          # $FLAGS is deliberately unquoted: it expands to several arguments.
+          # shellcheck disable=SC2086
+          cargo test -p bouquet $FLAGS
+
+  # The default ubuntu runner compiles the scalar fallback only, so without
+  # this leg every `unsafe` block in the AVX2 path is never even type-checked.
+  test-avx2:
+    name: test (x86_64 + AVX2)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings -C target-feature=+avx2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo test -p bouquet --features atomic,serde,blocked,simd
+
+  # ...and this one compiles the NEON path.
+  test-aarch64:
+    name: test (aarch64 + NEON)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo test -p bouquet --features atomic,serde,blocked,simd
+
+  # 32-bit target: catches usize/u64 assumptions in the index derivation and
+  # the sizing math that a 64-bit-only matrix cannot.
+  test-32bit:
+    name: test (i686)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - run: cargo test -p bouquet --target i686-unknown-linux-gnu --features atomic,serde,blocked,simd
+
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    env:
+      # The blocked backends index with `get_unchecked` and the SIMD backend
+      # casts `*const Cell<u64>` to `*mut u64`. Miri is the only thing in CI
+      # that actually checks those are sound.
+      MIRIFLAGS: -Zmiri-strict-provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo miri test -p bouquet --features atomic,serde,blocked --lib
+      # Miri does execute the AVX2 intrinsics (and NEON on aarch64), so run
+      # the backend tests with the SIMD path compiled in. `backend::` keeps
+      # this to ~1 min; the full lib suite under SIMD takes far longer.
+      - name: miri (AVX2 SIMD path)
+        env:
+          RUSTFLAGS: -C target-feature=+avx2
+        run: cargo miri test -p bouquet --features atomic,serde,blocked,simd --lib -- backend
+
+  docs:
+    name: docs (docs.rs config)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Mirrors `[package.metadata.docs.rs] features`. Deliberately NOT
+      # `--all-features`: that combination cannot compile, and getting this
+      # wrong means docs.rs silently fails to publish any documentation.
+      - run: cargo doc -p bouquet --no-deps --features std,classical,atomic,blocked,simd,serde
+      - run: cargo test -p bouquet --doc --features std,classical,atomic,blocked,simd,serde
 
   msrv:
     name: MSRV 1.95
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p bouquet --features atomic,serde,blocked,simd
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Build *and test* — an MSRV that compiles but miscompiles is not an
+      # MSRV. Cover bouquet-py too, so a binding-side MSRV break is caught.
+      - run: cargo test -p bouquet --features atomic,serde,blocked,simd
+      - run: cargo build -p bouquet-py
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Static analysis of the workflows themselves: catches unpinned actions,
+  # credential persistence, cache poisoning, and expression injection. The
+  # release workflows publish immutable artifacts, so a regression here is
+  # not recoverable after the fact.
+  zizmor:
+    name: zizmor (workflow audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - run: uvx zizmor --config .github/zizmor.yml .github/workflows/
 
   loom:
     name: loom
@@ -96,9 +235,11 @@ jobs:
       RUSTFLAGS: --cfg loom -D warnings
       LOOM_MAX_PREEMPTIONS: "3"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # Run only the loom test binary so the std-thread integration tests
       # don't get accidentally instrumented under loom's atomics.
       - run: cargo test -p bouquet --features loom,atomic --test loom_atomic --release
@@ -107,37 +248,56 @@ jobs:
     name: bench compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo bench -p bouquet --no-run --features simd,atomic
 
-  python-wheel:
-    name: bouquet-py wheel + pytest
-    # Path-filtered: skip when only the Rust core or docs change.
-    if: |
-      contains(toJSON(github.event.commits.*.modified), 'bouquet-py/')
-      || contains(toJSON(github.event.commits.*.modified), 'crates/bouquet/src/')
-      || contains(toJSON(github.event.commits.*.modified), 'crates/bouquet/Cargo.toml')
-      || github.event_name == 'pull_request'
+  python:
+    name: bouquet-py (${{ matrix.os }}, py${{ matrix.python-version }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.13"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.13", "3.14"]
+        # One wheel serves every version (abi3-py311), so the full cross
+        # product buys little. Test the version floor everywhere, and the
+        # newest interpreter on Linux.
+        exclude:
+          - { os: macos-latest, python-version: "3.14" }
+          - { os: windows-latest, python-version: "3.14" }
+          - { os: macos-latest, python-version: "3.13" }
+          - { os: windows-latest, python-version: "3.13" }
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: bouquet-py
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: ${{ matrix.python-version }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: install maturin + pytest
-        run: pip install maturin pytest
-      - name: maturin develop
-        working-directory: bouquet-py
-        run: maturin develop --release
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      # `--locked` is the point: pyproject sets `exclude-newer = "1 week"` so
+      # a freshly published (or freshly compromised) release cannot enter the
+      # lockfile without ageing first. Installing with bare `pip install`
+      # here would bypass both the lockfile and that cooldown entirely.
+      - name: sync locked dev environment
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv sync --locked --python "$PYTHON_VERSION"
+      - name: build extension
+        run: uv run --no-sync maturin develop --release
       - name: pytest
-        working-directory: bouquet-py
-        run: pytest -v
+        run: uv run --no-sync pytest -v
+      - name: ruff
+        run: uv run --no-sync ruff check .
+      - name: ruff format
+        run: uv run --no-sync ruff format --check .
+      - name: ty
+        run: uv run --no-sync ty check
