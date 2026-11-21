@@ -1,0 +1,92 @@
+name: Miri
+
+# Undefined-behaviour check for the `unsafe` code. Kept out of ci.yml on
+# purpose: Miri interprets the program, so it is far slower than a native
+# test run, and running it on every push tied up the runners.
+#
+# It runs on a daily schedule, not on push, and the job does real work only
+# when it is worth it:
+#   - the code Miri covers changed in the last day, or
+#   - it is Monday (so a new nightly Miri still gets run against old code), or
+#   - someone started it by hand (Actions -> Miri -> Run workflow).
+# Otherwise the job finishes after a few seconds without installing a
+# toolchain. To check a PR branch that touches `unsafe`, run it by hand or
+# use the commands in CONTRIBUTING.md.
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # daily, 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer run supersedes an in-flight one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    # Backstop: a runaway interpreter run must not hold a runner for hours.
+    # The two Miri steps below take about a minute each when healthy.
+    timeout-minutes: 30
+    env:
+      # The blocked backends index with `get_unchecked` and the SIMD backend
+      # casts `*const Cell<u64>` to `*mut u64`. Miri is the only thing in CI
+      # that actually checks those are sound.
+      MIRIFLAGS: -Zmiri-strict-provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # `git log --since` below needs the last day of history.
+          fetch-depth: 0
+
+      - name: decide whether to run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "schedule" ]; then
+            reason="started manually"
+          elif [ "$(date -u +%u)" = "1" ]; then
+            reason="Monday: weekly check against the latest nightly Miri"
+          elif [ -n "$(git log --since='26 hours ago' --format=%h -- \
+                crates/bouquet/src crates/bouquet/Cargo.toml Cargo.lock)" ]; then
+            reason="covered code changed in the last day"
+          else
+            reason=""
+          fi
+          if [ -n "$reason" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Running Miri: $reason"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping Miri: no changes to covered code since the last run."
+          fi
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - if: steps.gate.outputs.run == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # Only the backends: that is where every `unsafe` block lives. The rest
+      # of the lib suite (sizing sweeps, empirical false-positive runs) loops
+      # millions of times, which is minutes of wall-clock natively and hours
+      # under Miri, for code that has no `unsafe` to check.
+      - name: miri (scalar backends)
+        if: steps.gate.outputs.run == 'true'
+        run: cargo miri test -p bouquet --features atomic,serde,blocked --lib -- backend
+      # Miri does execute the AVX2 intrinsics (NEON on aarch64), so compile
+      # the SIMD path in and run it too.
+      - name: miri (AVX2 SIMD path)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          RUSTFLAGS: -C target-feature=+avx2
+        run: cargo miri test -p bouquet --features atomic,serde,blocked,simd --lib -- backend

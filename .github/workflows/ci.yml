@@ -144,30 +144,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
       - run: cargo test -p bouquet --target i686-unknown-linux-gnu --features atomic,serde,blocked,simd
 
-  miri:
-    name: miri
-    runs-on: ubuntu-latest
-    env:
-      # The blocked backends index with `get_unchecked` and the SIMD backend
-      # casts `*const Cell<u64>` to `*mut u64`. Miri is the only thing in CI
-      # that actually checks those are sound.
-      MIRIFLAGS: -Zmiri-strict-provenance
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo miri test -p bouquet --features atomic,serde,blocked --lib
-      # Miri does execute the AVX2 intrinsics (and NEON on aarch64), so run
-      # the backend tests with the SIMD path compiled in. `backend::` keeps
-      # this to ~1 min; the full lib suite under SIMD takes far longer.
-      - name: miri (AVX2 SIMD path)
-        env:
-          RUSTFLAGS: -C target-feature=+avx2
-        run: cargo miri test -p bouquet --features atomic,serde,blocked,simd --lib -- backend
+  # Miri is deliberately NOT here: it is an interpreter, an order of
+  # magnitude slower than native, and it ran on every PR push. It lives in
+  # miri.yml (pushes to main, weekly, manual) instead.
 
   docs:
     name: docs (docs.rs config)

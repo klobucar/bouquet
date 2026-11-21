@@ -43,13 +43,18 @@ a whole number of blocks, and indices are bounded by the sizing math).
   relies on, and every `unsafe fn` a `# Safety` section.
 - Do not add a new construction path without enforcing those invariants, and
   add a test that goes through it.
-- Changes near `unsafe` should pass Miri (nightly):
+- Changes near `unsafe` should pass Miri (nightly). CI does not run it on
+  pull requests or on push (it is slow); a daily scheduled run covers `main`
+  when the covered code changed (and every Monday regardless), and you can
+  start it on demand via Actions → Miri → Run workflow. Run it yourself when
+  you touch `unsafe`:
   ```bash
   MIRIFLAGS=-Zmiri-strict-provenance \
-    cargo miri test -p bouquet --features atomic,serde,blocked --lib
+    cargo miri test -p bouquet --features atomic,serde,blocked --lib -- backend
   ```
-  The SIMD tests can be run too (`--features simd`, filter on `backend::`);
-  on x86-64 add `RUSTFLAGS="-C target-feature=+avx2"` to exercise AVX2.
+  Filter on `backend`: the rest of the lib suite loops millions of times and
+  takes hours under Miri. Add `--features simd` to cover the SIMD paths; on
+  x86-64 also set `RUSTFLAGS="-C target-feature=+avx2"` to exercise AVX2.
 
 ### Tests worth knowing about
 
