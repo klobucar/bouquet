@@ -693,7 +693,10 @@ mod tests {
     /// `&Filter::insert` calls and produces a coherent result. This is *not*
     /// a model-checking test; the loom-based one in `tests/loom_atomic.rs`
     /// is.
-    #[cfg(feature = "atomic")]
+    ///
+    /// Not built under `loom`: there `Atomic` uses loom's atomics, which
+    /// panic when touched from plain `std` threads outside a `loom::model`.
+    #[cfg(all(feature = "atomic", not(feature = "loom")))]
     #[test]
     fn atomic_filter_concurrent_insert() {
         use std::sync::Arc;

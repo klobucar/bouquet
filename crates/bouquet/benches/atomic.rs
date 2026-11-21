@@ -8,7 +8,8 @@
 //! 2. Does concurrent insert scale? With four threads hammering the same
 //!    filter, the locked-bus penalty should still beat a `Mutex<Classical>`.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
 use bouquet::{Atomic, Classical, Filter};
 

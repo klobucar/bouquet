@@ -16,7 +16,7 @@ use bouquet::math::expected_fp;
 use bouquet::{Classical, Filter};
 use proptest::prelude::*;
 
-#[cfg(feature = "atomic")]
+#[cfg(all(feature = "atomic", not(feature = "loom")))]
 use bouquet::Atomic;
 #[cfg(feature = "blocked")]
 use bouquet::Blocked;
@@ -209,7 +209,9 @@ fn simd_blocked_fp_matches_scalar_blocked() {
     assert_eq!(measure_fp(&scalar, trials), measure_fp(&simd, trials));
 }
 
-#[cfg(feature = "atomic")]
+// Not built under `loom`: there `Atomic` uses loom's atomics, which panic
+// when used outside a `loom::model`. Loom coverage lives in `loom_atomic.rs`.
+#[cfg(all(feature = "atomic", not(feature = "loom")))]
 #[test]
 fn atomic_empirical_fp_matches_theory() {
     // Sanity: same property holds for the atomic backend with the same hash
