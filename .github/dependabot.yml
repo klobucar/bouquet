@@ -1,5 +1,9 @@
 version: 2
 
+# Every ecosystem waits 7 days before proposing a new release (`cooldown`),
+# matching `exclude-newer = "1 week"` in bouquet-py/pyproject.toml. That
+# blunts the window for a compromised or yanked release to reach a lockfile.
+# Cooldown applies to version updates only; security updates are immediate.
 updates:
   # SHA-pinned actions do not float, which is the point — but it also means
   # nothing gets security fixes without something bumping them. Dependabot
@@ -9,6 +13,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
@@ -24,6 +30,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       # One PR for the routine churn; majors still come through separately
       # so an MSRV-breaking bump is never buried in a batch.
@@ -35,6 +43,8 @@ updates:
     directory: "/bouquet-py"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       python-dev:
         patterns: ["*"]

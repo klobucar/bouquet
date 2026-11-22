@@ -13,10 +13,10 @@ python -m pip install bouquet-bloom
 ```python
 import bouquet
 
-f = bouquet.ClassicalFilter.from_false_pos(0.001, 100_000, seed=0xfeedface)
-f.insert("hello")           # str is fine — encoded as UTF-8 before hashing
+f = bouquet.ClassicalFilter.from_false_pos(0.001, 100_000, seed=0xFEEDFACE)
+f.insert("hello")  # str is fine — encoded as UTF-8 before hashing
 assert "hello" in f
-assert b"hello" in f        # bytes work too; str + equivalent bytes hash the same
+assert b"hello" in f  # bytes work too; str + equivalent bytes hash the same
 
 # Concurrent inserts: GIL is released during the bulk loop.
 g = bouquet.AtomicFilter.from_false_pos(0.001, 1_000_000)
@@ -79,8 +79,8 @@ about 30% faster than a Python loop over `insert` or `contains`.
 
 ```python
 f = bouquet.ClassicalFilter.from_false_pos(0.001, 100_000)
-duplicates = f.insert_many(["a", "b", "c"])   # count already present
-hits = f.contains_many(["a", "z"])            # [True, False]
+duplicates = f.insert_many(["a", "b", "c"])  # count already present
+hits = f.contains_many(["a", "z"])  # [True, False]
 ```
 
 On `AtomicFilter` both release the GIL while they run. They take a real

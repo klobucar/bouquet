@@ -4,6 +4,18 @@ All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0, minor
 versions may break.
 
+## [Unreleased]
+
+### Changed
+
+- Dropped the `bincode` dev-dependency and its round-trip test. The crate
+  is unmaintained (its 3.0.0 release is a deliberate compile error), and
+  the postcard test covers the same non-self-describing code path. The
+  README no longer lists bincode as a tested format; nothing in the
+  library changed.
+- Dependabot waits 7 days before proposing a new release, matching the
+  Python lockfile's cooldown.
+
 ## [0.2.0] — 2026-11-22
 
 ### Added

@@ -68,6 +68,7 @@ target-version = "py311"
 select = ["ALL"]
 ignore = [
     "D",      # docstrings: not enforced for these bindings/tests
+    "CPY",    # copyright headers: the repo carries one LICENSE file instead
     "COM812", # trailing-comma: conflicts with the formatter
     "ISC001", # implicit-str-concat: conflicts with the formatter
 ]

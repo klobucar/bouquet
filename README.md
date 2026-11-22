@@ -186,7 +186,7 @@ implements `PartialEq`.
 
 With `serde` enabled, deserialization validates filter metadata and checks
 the saved layout. `BlockedFilter` and `SimdBlockedFilter` share a layout.
-Supported formats include JSON, CBOR, bincode, and postcard.
+Supported formats include JSON, CBOR, and postcard.
 The serialization includes the hasher state, including the default
 hasher's SipHash key. Treat serialized filters as sensitive data because
 anyone with the bytes can reconstruct the hash function and test
