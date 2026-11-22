@@ -72,10 +72,11 @@ impl Backend for Classical {
             let cell = unsafe { self.bits.get_unchecked(word) };
             let mask = 1u64 << bit;
             let w = cell.get();
-            if w & mask == 0 {
-                all_set = false;
-                cell.set(w | mask);
-            }
+            // Store unconditionally. Skipping the store when the bit is
+            // already set is a branch on filter contents, which is a coin
+            // flip while the filter fills and mispredicts accordingly.
+            all_set &= w & mask != 0;
+            cell.set(w | mask);
         }
         all_set
     }
@@ -84,7 +85,22 @@ impl Backend for Classical {
     fn check_item(&self, hash: u64, k: u32) -> bool {
         let (h1, h2) = double_hash(hash);
         let len = self.bits.len();
-        for i in 0..k {
+        // Branch-free head, early-exit tail; see `CHECK_GROUP`.
+        let head = k.min(super::CHECK_GROUP);
+        let mut acc = 1u64;
+        for i in 0..head {
+            let ix = nth_index(self.num_bits, h1, h2, i);
+            let word = ix >> 6;
+            let bit = ix & 63;
+            debug_assert!(word < len);
+            // SAFETY: see `set_item`.
+            let w = unsafe { self.bits.get_unchecked(word) }.get();
+            acc &= w >> bit;
+        }
+        if acc & 1 == 0 {
+            return false;
+        }
+        for i in head..k {
             let ix = nth_index(self.num_bits, h1, h2, i);
             let word = ix >> 6;
             let bit = ix & 63;

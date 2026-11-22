@@ -230,6 +230,25 @@ where
 // Index derivation, shared by every backend.
 // ---------------------------------------------------------------------------
 
+/// Leading probes a flat backend tests without branching in `check_item`.
+///
+/// A lookup that exits at the first clear bit leaves at a different probe
+/// for every absent item, so the exit branch mispredicts about once per
+/// query and the flush throws away the next query's hash and loads, which
+/// were already running out of order. Measured on an M3 Max that made an
+/// absent lookup cost ~18 ns against ~10 ns for a present one.
+///
+/// Testing the first few probes as one AND-reduction leaves a single branch
+/// that is predictable for both answers: at the design load (half the bits
+/// set) four probes reject 15 in 16 absent items. The remaining probes keep
+/// the early exit, so a large `k` still stops at the first clear bit.
+///
+/// Four is the measured sweet spot. Two or three leave enough absent items
+/// for the tail loop that the mispredicts return; more than four fetches
+/// extra cache lines on absent lookups in a filter larger than the cache.
+#[cfg(any(feature = "classical", feature = "atomic"))]
+pub(crate) const CHECK_GROUP: u32 = 4;
+
 /// Compute the `(h1, h2)` pair used by double-hashing.
 ///
 /// `h1` is the seed hash unchanged. `h2` is derived through a SplitMix64-style

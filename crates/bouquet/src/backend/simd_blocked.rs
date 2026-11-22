@@ -76,7 +76,17 @@ fn build_mask(hash: u64, k: u32) -> [u64; BLOCK_WORDS] {
     let mut mask = [0u64; BLOCK_WORDS];
     for _ in 0..k {
         let in_ix = probes.next_probe() as usize;
-        mask[in_ix >> 6] |= 1u64 << (in_ix & 63);
+        let word = in_ix >> 6;
+        let bit = 1u64 << (in_ix & 63);
+        // Select the word with a compare instead of indexing by it. A
+        // data-dependent `mask[word] |= bit` forces the array onto the
+        // stack as a chain of 8-byte read-modify-writes, and the 16/32-byte
+        // vector loads that follow cannot be store-forwarded from those —
+        // they stall until the stores retire, which serialises consecutive
+        // operations. With constant indices the mask lives in registers.
+        for (j, m) in mask.iter_mut().enumerate() {
+            *m |= if j == word { bit } else { 0 };
+        }
     }
     mask
 }
@@ -530,6 +540,30 @@ mod tests {
                 simd.check_item(h, 7),
                 "check diverged at i={i} h={h:#x}"
             );
+        }
+    }
+
+    /// Same agreement across `k` values that span the probe-word boundary
+    /// (7 probes per mixed word), where the scalar lookup changes groups.
+    #[test]
+    fn matches_scalar_blocked_across_k() {
+        for k in [1u32, 6, 7, 8, 14, 15, 20, 64] {
+            let scalar = Blocked::with_capacity(16 * 1024);
+            let simd = SimdBlocked::with_capacity(16 * 1024);
+            for i in 0..300u64 {
+                let h = i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                assert_eq!(scalar.set_item(h, k), simd.set_item(h, k), "k={k} i={i}");
+                assert!(scalar.check_item(h, k), "false negative k={k} i={i}");
+            }
+            assert_eq!(scalar.count_ones(), simd.count_ones(), "k={k}");
+            for i in 0..2_000u64 {
+                let h = i.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                assert_eq!(
+                    scalar.check_item(h, k),
+                    simd.check_item(h, k),
+                    "check diverged k={k} i={i}"
+                );
+            }
         }
     }
 
