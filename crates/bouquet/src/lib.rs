@@ -201,6 +201,28 @@ impl<B: Backend, S: BuildHasher> Filter<B, S> {
         self.backend.check_item(h, self.num_hashes)
     }
 
+    /// Insert every item of `items`. Returns how many were probably already
+    /// present, i.e. how many [`Self::insert`] calls returned `true`.
+    ///
+    /// Accepts items by value or by reference:
+    ///
+    /// ```
+    /// # #[cfg(all(feature = "std", feature = "classical"))] {
+    /// use bouquet::ClassicalFilter;
+    ///
+    /// let filter = ClassicalFilter::with_false_pos(0.01).expected_items(100);
+    /// assert_eq!(filter.insert_all(["a", "b", "a"]), 1);
+    /// assert!(filter.contains("b"));
+    /// # }
+    /// ```
+    pub fn insert_all<I>(&self, items: I) -> usize
+    where
+        I: IntoIterator,
+        I::Item: Hash,
+    {
+        items.into_iter().filter(|item| self.insert(item)).count()
+    }
+
     /// Reset every bit to zero. Takes `&mut self`, so concurrent inserts
     /// are statically prevented from racing with `clear`.
     pub fn clear(&mut self) {
@@ -255,6 +277,64 @@ impl<B: Backend, S: BuildHasher + PartialEq> Filter<B, S> {
         self.num_hashes == other.num_hashes
             && self.backend.num_bits() == other.backend.num_bits()
             && self.hasher == other.hasher
+    }
+
+    /// Merge `other` into `self`, so that `self` reports present every
+    /// item either filter did. The result is bit-for-bit the filter you
+    /// would get by inserting both sets of items into one filter.
+    ///
+    /// Returns [`Error::Incompatible`], leaving `self` untouched, unless
+    /// [`Self::is_compatible`] holds. Two filters built with the default
+    /// random key are never compatible; give both the same
+    /// [`WithFalsePos::seed`].
+    ///
+    /// ```
+    /// # #[cfg(all(feature = "std", feature = "classical"))] {
+    /// use bouquet::ClassicalFilter;
+    ///
+    /// let build = || ClassicalFilter::with_false_pos(0.01).seed(7).expected_items(100);
+    /// let (mut a, b) = (build(), build());
+    /// a.insert("left");
+    /// b.insert("right");
+    /// a.union_with(&b).unwrap();
+    /// assert!(a.contains("left") && a.contains("right"));
+    /// # }
+    /// ```
+    pub fn union_with(&mut self, other: &Self) -> Result<(), Error> {
+        if !self.is_compatible(other) {
+            return Err(Error::Incompatible);
+        }
+        self.backend.union_with(&other.backend);
+        Ok(())
+    }
+
+    /// Keep only the bits set in both filters.
+    ///
+    /// Every item inserted into *both* filters is still reported present.
+    /// Unlike [`Self::union_with`], the result is not the filter you would
+    /// get by inserting the true intersection: bits set by unrelated items
+    /// on each side survive where they coincide, so the false-positive
+    /// rate is higher than a filter built from the common items alone, and
+    /// [`Self::estimate_count`] overestimates.
+    ///
+    /// Returns [`Error::Incompatible`], leaving `self` untouched, unless
+    /// [`Self::is_compatible`] holds.
+    pub fn intersect_with(&mut self, other: &Self) -> Result<(), Error> {
+        if !self.is_compatible(other) {
+            return Err(Error::Incompatible);
+        }
+        self.backend.intersect_with(&other.backend);
+        Ok(())
+    }
+}
+
+/// Insert every item the iterator yields. Equivalent to
+/// [`Filter::insert_all`] with the duplicate count discarded.
+impl<B: Backend, S: BuildHasher, T: Hash> Extend<T> for Filter<B, S> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            self.insert(&item);
+        }
     }
 }
 
@@ -469,8 +549,8 @@ fn round_up_bits(num_bits: usize) -> usize {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors returned from validated entry points (currently only the `serde`
-/// deserializer).
+/// Errors returned from validated entry points: the `try_*` constructors,
+/// the set operations, and the `serde` deserializer.
 ///
 /// Marked `#[non_exhaustive]`: new validation rules add variants, and that
 /// should not be a breaking change for downstream `match`es.
@@ -517,6 +597,9 @@ pub enum Error {
         /// Layout tag found in the serialized form.
         found: alloc::string::String,
     },
+    /// Two filters cannot be combined because they differ in size, hash
+    /// count, or hasher. See [`Filter::is_compatible`].
+    Incompatible,
 }
 
 impl fmt::Display for Error {
@@ -549,6 +632,9 @@ impl fmt::Display for Error {
                 "filter was serialized with layout '{found}' but this backend uses '{expected}'; \
                  loading it would produce false negatives",
             ),
+            Error::Incompatible => {
+                f.write_str("filters differ in size, hash count, or hasher and cannot be combined")
+            }
         }
     }
 }

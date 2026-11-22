@@ -142,6 +142,28 @@ impl Backend for Atomic {
         }
     }
 
+    fn union_with(&mut self, other: &Self) {
+        assert_eq!(self.num_bits, other.num_bits, "union_with: size mismatch");
+        // `&mut self` is unique access, so load-then-store cannot lose a
+        // concurrent insert into `self`. (`get_mut` would be tidier, but
+        // loom's atomics do not offer it.)
+        for (dst, src) in self.bits.iter().zip(other.bits.iter()) {
+            let merged = dst.load(Ordering::Relaxed) | src.load(Ordering::Relaxed);
+            dst.store(merged, Ordering::Relaxed);
+        }
+    }
+
+    fn intersect_with(&mut self, other: &Self) {
+        assert_eq!(
+            self.num_bits, other.num_bits,
+            "intersect_with: size mismatch"
+        );
+        for (dst, src) in self.bits.iter().zip(other.bits.iter()) {
+            let merged = dst.load(Ordering::Relaxed) & src.load(Ordering::Relaxed);
+            dst.store(merged, Ordering::Relaxed);
+        }
+    }
+
     #[cfg(feature = "serde")]
     fn snapshot_words(&self) -> Vec<u64> {
         self.bits

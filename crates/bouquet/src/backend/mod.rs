@@ -174,6 +174,24 @@ pub trait Backend: Sized {
     /// construction, not racy with concurrent `set_item` / `check_item`.
     fn clear(&mut self);
 
+    /// OR every bit of `other` into `self`.
+    ///
+    /// Only meaningful when both backends were filled through the same
+    /// hasher and `k`; [`crate::Filter::union_with`] checks that.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two backends differ in [`Self::num_bits`].
+    fn union_with(&mut self, other: &Self);
+
+    /// AND every bit of `self` with `other`. Same contract as
+    /// [`Self::union_with`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two backends differ in [`Self::num_bits`].
+    fn intersect_with(&mut self, other: &Self);
+
     /// Snapshot the storage as a `Vec<u64>`. Used by the serde implementation.
     /// Concurrent backends are expected to use a relaxed load — a snapshot
     /// taken concurrently with inserts may lag, but every observed bit is

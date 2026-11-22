@@ -326,6 +326,23 @@ impl Backend for Blocked {
         }
     }
 
+    fn union_with(&mut self, other: &Self) {
+        assert_eq!(self.num_bits, other.num_bits, "union_with: size mismatch");
+        for (dst, src) in self.bits.iter_mut().zip(other.bits.iter()) {
+            *dst.get_mut() |= src.get();
+        }
+    }
+
+    fn intersect_with(&mut self, other: &Self) {
+        assert_eq!(
+            self.num_bits, other.num_bits,
+            "intersect_with: size mismatch"
+        );
+        for (dst, src) in self.bits.iter_mut().zip(other.bits.iter()) {
+            *dst.get_mut() &= src.get();
+        }
+    }
+
     #[cfg(feature = "serde")]
     fn snapshot_words(&self) -> alloc::vec::Vec<u64> {
         self.bits.iter().map(|c| c.get()).collect()
