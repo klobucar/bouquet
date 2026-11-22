@@ -3,18 +3,12 @@
 Python bindings for [`bouquet`](https://github.com/klobucar/bouquet) —
 pluggable Bloom filters with a Rust core.
 
-> **Not published yet.** There is no `bouquet-bloom` on PyPI at the time of
-> writing, so the install line below will not work until the first release.
-> Build from source in the meantime (see below).
-
-Installed as **`bouquet-bloom`**, imported as **`bouquet`**:
+Install [`bouquet-bloom`](https://pypi.org/project/bouquet-bloom/) for
+CPython 3.11 or later, then import it as `bouquet`.
 
 ```sh
-pip install bouquet-bloom
+python -m pip install bouquet-bloom
 ```
-
-The bare `bouquet` name on PyPI belongs to an unrelated placeholder project —
-`pip install bouquet` will *not* get you this library.
 
 ```python
 import bouquet
