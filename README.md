@@ -184,35 +184,39 @@ iteration). Lower is better. Run on Apple M3 Max (`aarch64-apple-darwin`),
 
 ### `insert` (ns/op)
 
-| Size | Classical | Blocked | SimdBlocked | fastbloom |
-|------|-----------|---------|-------------|-----------|
-| 10K  | **9.6**   | **9.6** | 22.5        | 12.5      |
-| 100K | **10.2**  | 10.8    | 23.1        | 12.6      |
-| 1M   | 25.4      | 24.7    | 23.7        | **12.6**  |
-| 10M  | 21.5      | 21.4    | 24.4        | **13.7**  |
+| Size | Classical | Blocked  | SimdBlocked | fastbloom |
+|------|-----------|----------|-------------|-----------|
+| 10K  | 9.9       | **9.7**  | 11.3        | 9.9       |
+| 100K | 10.0      | **9.7**  | 11.2        | 9.9       |
+| 1M   | 10.8      | 10.6     | 11.3        | **10.4**  |
+| 10M  | **11.7**  | 15.3     | 13.0        | 12.0      |
 
 ### `contains_present` (ns/op)
 
-| Size | Classical | Blocked | SimdBlocked | fastbloom |
-|------|-----------|---------|-------------|-----------|
-| 10K  | **10.9**  | 11.5    | 28.6        | 14.6      |
-| 100K | **10.8**  | 11.4    | 28.1        | 14.6      |
-| 1M   | **11.8**  | 12.3    | 29.2        | 15.0      |
-| 10M  | **13.7**  | 14.2    | 29.5        | 16.8      |
+| Size | Classical | Blocked  | SimdBlocked | fastbloom |
+|------|-----------|----------|-------------|-----------|
+| 10K  | 10.8      | **10.3** | 13.1        | 11.5      |
+| 100K | 10.4      | **10.2** | 13.2        | 11.6      |
+| 1M   | 11.3      | **10.8** | 13.2        | 12.1      |
+| 10M  | **14.1**  | 15.7     | 16.0        | **14.1**  |
 
 ### `contains_absent` (ns/op)
 
-| Size | Classical | Blocked | SimdBlocked | fastbloom |
-|------|-----------|---------|-------------|-----------|
-| 10K  | 18.3      | 20.1    | 22.3        | **18.0**  |
-| 100K | 18.3      | 20.2    | 22.2        | **18.0**  |
-| 1M   | **21.6**  | 22.8    | 22.1        | 22.2      |
-| 10M  | 24.7      | 25.1    | **22.4**    | 25.6      |
+| Size | Classical | Blocked  | SimdBlocked | fastbloom |
+|------|-----------|----------|-------------|-----------|
+| 10K  | **9.2**   | 9.4      | 12.2        | 18.6      |
+| 100K | **9.1**   | 9.4      | 12.0        | 18.6      |
+| 1M   | 10.1      | **9.9**  | 11.8        | 22.6      |
+| 10M  | **11.3**  | 11.9     | 14.4        | 26.5      |
 
-On the M3 Max, `Classical` had the lowest `contains_present` latency at
-every size tested. Fastbloom led insertions at 1M and 10M items, and
-`SimdBlocked` led absent lookups at 10M. The SIMD results here are for
-NEON. See the [roadmap](https://github.com/klobucar/bouquet/blob/main/ROADMAP.md) for backend work in progress.
+On the M3 Max, `Classical` and `Blocked` were within about half a
+nanosecond of each other up to 1M items, and `Classical` led or tied every
+operation at 10M. Absent lookups took about half as long as fastbloom's at
+every size. Insertions were level with fastbloom. `SimdBlocked` trailed
+scalar `Blocked` by 1 to 3 ns except on 10M insertions; the SIMD results
+here are for NEON. See the
+[roadmap](https://github.com/klobucar/bouquet/blob/main/ROADMAP.md) for
+backend work in progress.
 
 ## Rust version and license
 

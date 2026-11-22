@@ -266,10 +266,11 @@ impl Backend for Blocked {
             let cell = unsafe { self.bits.get_unchecked(word_ix) };
             let mask = 1u64 << bit;
             let w = cell.get();
-            if w & mask == 0 {
-                all_set = false;
-                cell.set(w | mask);
-            }
+            // Store unconditionally. Skipping the store when the bit is
+            // already set is a branch on filter contents, which is a coin
+            // flip while the filter fills and mispredicts accordingly.
+            all_set &= w & mask != 0;
+            cell.set(w | mask);
         }
         all_set
     }
@@ -278,22 +279,38 @@ impl Backend for Blocked {
     fn check_item(&self, hash: u64, k: u32) -> bool {
         let block = block_index(hash, self.num_blocks);
         let word_offset = block * BLOCK_WORDS;
-        let mut probes = BlockProbes::new(hash);
-        let k = effective_k(k);
+        let mut remaining = effective_k(k);
         let len = self.bits.len();
 
-        for _ in 0..k {
-            let in_ix = probes.next_probe() as usize;
-            let word_ix = word_offset + (in_ix >> 6);
-            let bit = in_ix & 63;
-            debug_assert!(word_ix < len);
-            // SAFETY: see `set_item`.
-            let w = unsafe { self.bits.get_unchecked(word_ix) }.get();
-            if (w >> bit) & 1 == 0 {
+        // One group per mixed word: the probes inside a group are tested
+        // without branching and the early exit sits between groups. Every
+        // probe is in the same block, so the extra loads are L1 hits on a
+        // line the first probe already fetched, and an absent item costs
+        // one well-predicted branch instead of a mispredicted exit at a
+        // random probe. Same probe sequence as `BlockProbes`.
+        let mut round = 0u64;
+        loop {
+            let mut word = probe_word(hash, round);
+            let n = remaining.min(PROBES_PER_WORD);
+            let mut acc = 1u64;
+            for _ in 0..n {
+                let in_ix = (word & BLOCK_BIT_MASK) as usize;
+                word >>= PROBE_BITS;
+                let word_ix = word_offset + (in_ix >> 6);
+                debug_assert!(word_ix < len);
+                // SAFETY: see `set_item`.
+                let w = unsafe { self.bits.get_unchecked(word_ix) }.get();
+                acc &= w >> (in_ix & 63);
+            }
+            if acc & 1 == 0 {
                 return false;
             }
+            remaining -= n;
+            if remaining == 0 {
+                return true;
+            }
+            round += 1;
         }
-        true
     }
 
     fn count_ones(&self) -> usize {

@@ -61,10 +61,11 @@ fn item_type_error(obj: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
-/// Input for the single-item methods. Extraction tries, in order:
-/// `Bytes` covers `bytes` and `bytearray` (zero-copy — `PyBackedBytes`
-/// keeps a Python reference); `Str` covers `str` (CPython's UTF-8 cache,
-/// zero-copy when already encoded); `Other` is the buffer-protocol
+/// One item argument, for the single-item methods and `insert_many`.
+/// Extraction tries, in order: `Str` covers `str` (CPython's UTF-8 cache,
+/// zero-copy when already encoded); `Bytes` covers `bytes` (zero-copy —
+/// `PyBackedBytes` keeps a Python reference) and `bytearray` (copied,
+/// since it is mutable); `Other` is the buffer-protocol
 /// fallback for `memoryview` and the like, which pays one allocation
 /// since arbitrary buffer objects don't give us a stable borrow. All
 /// arms hash the same underlying bytes, so `f.insert("hello")` and
@@ -86,9 +87,9 @@ impl<'a, 'py> FromPyObject<'a, 'py> for BytesOrStr {
 
     fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         let obj = &*obj;
-        if let Ok(b) = obj.extract::<PyBackedBytes>() {
-            return Ok(Self::Bytes(b));
-        }
+        // `str` first: it is the common argument, and trying `PyBackedBytes`
+        // on one builds and discards a Python `TypeError` on every call.
+        //
         // Dispatch `str` on its *type*, not on whether extraction succeeds.
         // Extraction fails for a `str` holding a lone surrogate (routine
         // from `os.fsdecode`, `surrogateescape` decoding, or `json.loads`
@@ -97,6 +98,9 @@ impl<'a, 'py> FromPyObject<'a, 'py> for BytesOrStr {
         // <class 'str'>". Let Python's own UnicodeEncodeError surface.
         if obj.is_instance_of::<PyString>() {
             return obj.extract::<PyBackedStr>().map(Self::Str);
+        }
+        if let Ok(b) = obj.extract::<PyBackedBytes>() {
+            return Ok(Self::Bytes(b));
         }
         let buf = PyBuffer::<u8>::get(obj).map_err(|_| item_type_error(obj))?;
         Ok(Self::Other(buf.to_vec(obj.py())?))
@@ -110,41 +114,6 @@ impl BytesOrStr {
             Self::Bytes(b) => b,
             Self::Str(s) => s.as_bytes(),
             Self::Other(v) => v,
-        }
-    }
-}
-
-/// Owned variant used by `AtomicFilter.insert_many`, where the GIL is
-/// released for the duration of the loop. Items are extracted to owned
-/// `Vec<u8>` / `String` up front so the inserts can run without holding a
-/// Python reference across the GIL boundary. Like [`BytesOrStr`], the
-/// bytes arm is restricted to buffer-protocol objects so a list of ints
-/// is rejected instead of coerced.
-enum OwnedBytesOrStr {
-    Bytes(Vec<u8>),
-    Str(String),
-}
-
-impl<'a, 'py> FromPyObject<'a, 'py> for OwnedBytesOrStr {
-    type Error = PyErr;
-
-    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-        let obj = &*obj;
-        // Type-dispatched for the same reason as `BytesOrStr`.
-        if obj.is_instance_of::<PyString>() {
-            return obj.extract::<String>().map(Self::Str);
-        }
-        let buf = PyBuffer::<u8>::get(obj).map_err(|_| item_type_error(obj))?;
-        Ok(Self::Bytes(buf.to_vec(obj.py())?))
-    }
-}
-
-impl OwnedBytesOrStr {
-    #[inline]
-    fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Bytes(b) => b,
-            Self::Str(s) => s.as_bytes(),
         }
     }
 }
@@ -415,7 +384,12 @@ impl AtomicFilter {
                 items.get_type()
             )));
         }
-        let items: Vec<OwnedBytesOrStr> = items.extract()?;
+        // `BytesOrStr` borrows `str` and `bytes` payloads instead of copying
+        // them: both are immutable, and the backing references are `Send`,
+        // so the slices stay valid while the GIL is released. (`bytearray`
+        // is mutable, so `PyBackedBytes` copies it.) The references are
+        // dropped after `detach` returns, with the GIL held again.
+        let items: Vec<BytesOrStr> = items.extract()?;
         Ok(py.detach(|| {
             items
                 .iter()

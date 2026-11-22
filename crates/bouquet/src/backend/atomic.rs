@@ -99,7 +99,22 @@ impl Backend for Atomic {
     fn check_item(&self, hash: u64, k: u32) -> bool {
         let (h1, h2) = double_hash(hash);
         let len = self.bits.len();
-        for i in 0..k {
+        // Branch-free head, early-exit tail; see `CHECK_GROUP`.
+        let head = k.min(super::CHECK_GROUP);
+        let mut acc = 1u64;
+        for i in 0..head {
+            let ix = nth_index(self.num_bits, h1, h2, i);
+            let word = ix >> 6;
+            let bit = ix & 63;
+            debug_assert!(word < len);
+            // SAFETY: see `set_item`.
+            let w = unsafe { self.bits.get_unchecked(word) }.load(Ordering::Relaxed);
+            acc &= w >> bit;
+        }
+        if acc & 1 == 0 {
+            return false;
+        }
+        for i in head..k {
             let ix = nth_index(self.num_bits, h1, h2, i);
             let word = ix >> 6;
             let bit = ix & 63;
