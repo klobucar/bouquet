@@ -142,7 +142,7 @@ The crate can run in `no_std` environments with `alloc`. Supply an explicit
 seed for `DefaultHasher` using `with_false_pos_seeded` or `with_num_bits_seeded`.
 
 ```toml
-bouquet = { version = "0.1", default-features = false, features = ["classical"] }
+bouquet = { version = "0.2", default-features = false, features = ["classical"] }
 ```
 
 ```rust
