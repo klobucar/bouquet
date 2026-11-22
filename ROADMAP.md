@@ -24,24 +24,26 @@ across the 8 words of the block.
 
 ### NEON redesign for `SimdBlocked`
 
-The current NEON implementation is *correct* but *slower than scalar
-`Blocked`* on Apple silicon (M3 Max measured), by ~2-2.5× at
-`contains_present`. The mask-build-then-load pattern hits store-to-load
-forwarding stalls, and the 4× 128-bit register layout doesn't amortize the
-SIMD setup overhead for a block that fits in one cache line.
+The NEON implementation used to run 2-2.5× slower than scalar `Blocked` on
+Apple silicon (M3 Max). The cause was the mask build: it wrote the mask to
+the stack one word at a time, and the vector loads that followed could not
+be store-forwarded from those writes. Building the mask in registers fixed
+that, and `SimdBlocked` now trails scalar `Blocked` by 1 to 3 ns per
+operation instead.
 
-Approaches to evaluate:
+It still does not win, because the scalar path touches only the words its
+probes land in while the wide path loads and compares the whole block.
+Approaches left to evaluate:
 
-- Build the OR-mask directly in NEON registers using `vsetq_lane_u64`,
-  avoiding the stack round-trip. Branchy on the lane index but fits k=7.
 - Expand block size from 512 → 1024 bits (full Apple silicon cache line)
   so the wide load amortizes better. Trades a small FP-rate hit for
   bigger blocks.
 - Vectorize the probe-derivation step itself (compute `k` indices in
   parallel as a vector). Plausible with NEON's variable-shift ops.
 
-Until one of these wins on `contains_present` the type is honest about
-its current state but not the recommended pick on aarch64.
+Until one of these wins the type is not the recommended pick on aarch64.
+The AVX2 path shares the mask build but has not been benchmarked since the
+fix.
 
 ### AVX-512 path for `SimdBlocked`
 
@@ -76,9 +78,10 @@ Out of scope for any 0.x release; tracked here so they aren't reinvented:
 - **mmap persistence**: a `MmapBacked` backend that reads bits from a
   read-only mapping. Useful for large filters where the cost of loading from
   disk is amortized over many processes.
-- **`union` / `intersect`**: cheap when filters share `(num_bits, k, hasher)`.
-  The `Filter::is_compatible` predicate already exists; the operations
-  themselves are a small followup.
+- ~~**`union` / `intersect`**~~: done. `Filter::union_with` and
+  `Filter::intersect_with` combine filters that share
+  `(num_bits, k, hasher)` and return `Error::Incompatible` otherwise. Not
+  yet exposed in the Python bindings.
 - ~~**Builder errors instead of panics**~~: done.
   `WithFalsePos::try_expected_items`, `WithNumBits::try_expected_items`, and
   `WithNumBits::try_hashes` return `Result` and report allocation failure
