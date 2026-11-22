@@ -10,7 +10,7 @@ members = [
 # `bouquet-py` (PyPI, as `bouquet-bloom`) both inherit it, so a wheel built
 # from a commit always carries the version of the core crate it contains.
 # Bump it here, then tag `vX.Y.Z` and `py-vX.Y.Z` on the same commit.
-version = "0.1.1"
+version = "0.2.0"
 
 # Shared release profile — both crates build with the same optimization
 # settings so benches and Python wheels measure the same code.
