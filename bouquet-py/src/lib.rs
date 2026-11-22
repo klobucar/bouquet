@@ -12,7 +12,7 @@
 // offending code is in expanded macros, not source we control.
 #![allow(clippy::useless_conversion)]
 
-use ::bouquet::{Atomic, Blocked, Classical, Error as BouquetError, Filter};
+use ::bouquet::{Atomic, Backend, Blocked, Classical, Error as BouquetError, Filter};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyMemoryError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -186,6 +186,105 @@ fn check_implied_size(expected_items: usize, false_pos: f64) -> PyResult<()> {
     Ok(())
 }
 
+/// Shared body of every class's `from_num_bits`.
+fn build_from_num_bits<B: Backend>(
+    num_bits: usize,
+    expected_items: Option<usize>,
+    hashes: Option<u32>,
+    seed: Option<u128>,
+) -> PyResult<Filter<B>> {
+    check_num_bits(num_bits)?;
+    let builder = Filter::<B>::with_num_bits(num_bits);
+    let builder = match seed {
+        Some(s) => builder.seed(s),
+        None => builder,
+    };
+    match (expected_items, hashes) {
+        (Some(_), Some(_)) | (None, None) => Err(PyValueError::new_err(
+            "pass exactly one of expected_items or hashes",
+        )),
+        (Some(n), None) => {
+            check_items(n)?;
+            builder.try_expected_items(n).map_err(map_bouquet_err)
+        }
+        (None, Some(k)) => {
+            check_hashes(k)?;
+            builder.try_hashes(k).map_err(map_bouquet_err)
+        }
+    }
+}
+
+/// Extract the argument of `insert_many` / `contains_many`.
+///
+/// A bytes-like or str argument would otherwise be iterated as a sequence —
+/// of ints for bytes, of 1-char strs for str — and report the baffling
+/// "expected str or a bytes-like object, got <class 'int'>" about an
+/// argument that *is* bytes-like.
+///
+/// `BytesOrStr` borrows `str` and `bytes` payloads instead of copying them:
+/// both are immutable, and the backing references are `Send`, so the slices
+/// stay valid if the caller releases the GIL. (`bytearray` is mutable, so
+/// `PyBackedBytes` copies it.)
+fn extract_items(method: &str, items: &Bound<'_, PyAny>) -> PyResult<Vec<BytesOrStr>> {
+    if items.is_instance_of::<PyBytes>()
+        || items.is_instance_of::<PyByteArray>()
+        || items.is_instance_of::<PyString>()
+    {
+        return Err(PyTypeError::new_err(format!(
+            "{method} expects a sequence of items, got a single {} — \
+             wrap it in a list to pass one item",
+            items.get_type()
+        )));
+    }
+    items.extract()
+}
+
+/// Leading bytes of a serialized filter: a tag, then a format version.
+///
+/// The version byte is what lets the encoding change later without old
+/// blobs being misread: an unknown version is rejected up front.
+const WIRE_MAGIC: &[u8; 4] = b"BQT\x01";
+
+/// Shared body of every class's `to_bytes`.
+fn dump<'py, B: Backend>(py: Python<'py>, filter: &Filter<B>) -> PyResult<Bound<'py, PyBytes>> {
+    let mut out = WIRE_MAGIC.to_vec();
+    out = postcard::to_extend(filter, out)
+        .map_err(|e| PyValueError::new_err(format!("could not serialize filter: {e}")))?;
+    Ok(PyBytes::new(py, &out))
+}
+
+/// Shared body of every class's `from_bytes`.
+///
+/// The core deserializer validates the payload (layout tag, hash count,
+/// word count against the claimed size), so a corrupt or mismatched blob is
+/// a `ValueError`, never a filter that answers wrongly.
+fn load<B: Backend>(data: &[u8]) -> PyResult<Filter<B>> {
+    let payload = data.strip_prefix(WIRE_MAGIC.as_slice()).ok_or_else(|| {
+        PyValueError::new_err(
+            "not a bouquet filter: bad header (wrong data, or written by an \
+             incompatible version)",
+        )
+    })?;
+    // postcard discards the text of serde's custom errors, so the core
+    // deserializer's typed rejections all surface as one opaque message.
+    // Read the leading layout tag here to give the one mistake a caller is
+    // likely to make — loading into the wrong class — a useful error.
+    let corrupt = |e: postcard::Error| {
+        PyValueError::new_err(format!(
+            "could not load filter: corrupt or truncated data ({e})"
+        ))
+    };
+    let (layout, _) = postcard::take_from_bytes::<&str>(payload).map_err(corrupt)?;
+    if layout != B::LAYOUT.as_str() {
+        return Err(PyValueError::new_err(format!(
+            "filter was saved with layout '{layout}' but this class uses '{}'; \
+             loading it would produce false negatives",
+            B::LAYOUT
+        )));
+    }
+    postcard::from_bytes(payload).map_err(corrupt)
+}
+
 // ---------------------------------------------------------------------------
 // ClassicalFilter
 // ---------------------------------------------------------------------------
@@ -237,32 +336,7 @@ impl ClassicalFilter {
         hashes: Option<u32>,
         seed: Option<u128>,
     ) -> PyResult<Self> {
-        check_num_bits(num_bits)?;
-        match (expected_items, hashes) {
-            (Some(_), Some(_)) | (None, None) => Err(PyValueError::new_err(
-                "pass exactly one of expected_items or hashes",
-            )),
-            (Some(n), None) => {
-                check_items(n)?;
-                let builder = Filter::<Classical>::with_num_bits(num_bits);
-                let inner = match seed {
-                    Some(s) => builder.seed(s).try_expected_items(n),
-                    None => builder.try_expected_items(n),
-                }
-                .map_err(map_bouquet_err)?;
-                Ok(Self { inner })
-            }
-            (None, Some(k)) => {
-                check_hashes(k)?;
-                let builder = Filter::<Classical>::with_num_bits(num_bits);
-                let inner = match seed {
-                    Some(s) => builder.seed(s).try_hashes(k),
-                    None => builder.try_hashes(k),
-                }
-                .map_err(map_bouquet_err)?;
-                Ok(Self { inner })
-            }
-        }
+        build_from_num_bits(num_bits, expected_items, hashes, seed).map(|inner| Self { inner })
     }
 
     /// Insert `item` (bytes, bytearray, memoryview, or str). Returns `True`
@@ -283,6 +357,26 @@ impl ClassicalFilter {
         self.inner.contains(item.as_bytes())
     }
 
+    /// Bulk insert from a sequence (list or tuple) of items. Returns the
+    /// number of items that were already fully present (probable
+    /// duplicates). One call instead of one per item; the GIL stays held,
+    /// because this filter is single-threaded.
+    fn insert_many(&self, items: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let items = extract_items("insert_many", items)?;
+        Ok(self
+            .inner
+            .insert_all(items.iter().map(BytesOrStr::as_bytes)))
+    }
+
+    /// Bulk membership test. Returns one `bool` per item, in order.
+    fn contains_many(&self, items: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        let items = extract_items("contains_many", items)?;
+        Ok(items
+            .iter()
+            .map(|item| self.inner.contains(item.as_bytes()))
+            .collect())
+    }
+
     /// Reset every bit to zero.
     fn clear(&mut self) {
         self.inner.clear();
@@ -299,6 +393,23 @@ impl ClassicalFilter {
     /// because the estimator has no finite answer there.
     fn is_saturated(&self) -> bool {
         self.inner.is_saturated()
+    }
+
+    /// Serialize the filter, including its hash key, to `bytes`.
+    ///
+    /// The key is needed to query the filter after loading, so anyone who
+    /// can read these bytes can test membership and craft colliding
+    /// inputs. Keep them as private as the data the filter describes.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        dump(py, &self.inner)
+    }
+
+    /// Rebuild a filter from `to_bytes` output. Raises `ValueError` on
+    /// anything else, including bytes written by a class with a different
+    /// bit layout. Only load bytes you trust.
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        load(data).map(|inner| Self { inner })
     }
 
     #[getter]
@@ -349,6 +460,19 @@ impl AtomicFilter {
         Ok(Self { inner })
     }
 
+    /// Build a filter with explicit `num_bits` and either `expected_items`
+    /// (to derive `k`) or `hashes` (to set `k` directly). Pass exactly one.
+    #[staticmethod]
+    #[pyo3(signature = (num_bits, *, expected_items=None, hashes=None, seed=None))]
+    fn from_num_bits(
+        num_bits: usize,
+        expected_items: Option<usize>,
+        hashes: Option<u32>,
+        seed: Option<u128>,
+    ) -> PyResult<Self> {
+        build_from_num_bits(num_bits, expected_items, hashes, seed).map(|inner| Self { inner })
+    }
+
     fn insert(&self, item: BytesOrStr) -> bool {
         self.inner.insert(item.as_bytes())
     }
@@ -370,31 +494,26 @@ impl AtomicFilter {
     /// `bytes` or `str` directly raises `TypeError` rather than iterating
     /// it element-wise.
     fn insert_many(&self, py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<usize> {
-        // A bytes-like or str argument would otherwise be iterated as a
-        // sequence — of ints for bytes, of 1-char strs for str — and report
-        // the baffling "expected str or a bytes-like object, got
-        // <class 'int'>" about an argument that *is* bytes-like.
-        if items.is_instance_of::<PyBytes>()
-            || items.is_instance_of::<PyByteArray>()
-            || items.is_instance_of::<PyString>()
-        {
-            return Err(PyTypeError::new_err(format!(
-                "insert_many expects a sequence of items, got a single {} — \
-                 wrap it in a list to insert one item",
-                items.get_type()
-            )));
-        }
-        // `BytesOrStr` borrows `str` and `bytes` payloads instead of copying
-        // them: both are immutable, and the backing references are `Send`,
-        // so the slices stay valid while the GIL is released. (`bytearray`
-        // is mutable, so `PyBackedBytes` copies it.) The references are
-        // dropped after `detach` returns, with the GIL held again.
-        let items: Vec<BytesOrStr> = items.extract()?;
+        let items = extract_items("insert_many", items)?;
+        // The borrowed items are dropped after `detach` returns, with the GIL
+        // held again.
         Ok(py.detach(|| {
             items
                 .iter()
                 .filter(|item| self.inner.insert(item.as_bytes()))
                 .count()
+        }))
+    }
+
+    /// Bulk membership test. Returns one `bool` per item, in order.
+    /// Releases the GIL while running, like `insert_many`.
+    fn contains_many(&self, py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        let items = extract_items("contains_many", items)?;
+        Ok(py.detach(|| {
+            items
+                .iter()
+                .map(|item| self.inner.contains(item.as_bytes()))
+                .collect()
         }))
     }
 
@@ -411,6 +530,23 @@ impl AtomicFilter {
     /// because the estimator has no finite answer there.
     fn is_saturated(&self) -> bool {
         self.inner.is_saturated()
+    }
+
+    /// Serialize the filter, including its hash key, to `bytes`.
+    ///
+    /// The key is needed to query the filter after loading, so anyone who
+    /// can read these bytes can test membership and craft colliding
+    /// inputs. Keep them as private as the data the filter describes.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        dump(py, &self.inner)
+    }
+
+    /// Rebuild a filter from `to_bytes` output. Raises `ValueError` on
+    /// anything else, including bytes written by a class with a different
+    /// bit layout. Only load bytes you trust.
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        load(data).map(|inner| Self { inner })
     }
 
     #[getter]
@@ -468,6 +604,19 @@ impl BlockedFilter {
         Ok(Self { inner })
     }
 
+    /// Build a filter with explicit `num_bits` and either `expected_items`
+    /// (to derive `k`) or `hashes` (to set `k` directly). Pass exactly one.
+    #[staticmethod]
+    #[pyo3(signature = (num_bits, *, expected_items=None, hashes=None, seed=None))]
+    fn from_num_bits(
+        num_bits: usize,
+        expected_items: Option<usize>,
+        hashes: Option<u32>,
+        seed: Option<u128>,
+    ) -> PyResult<Self> {
+        build_from_num_bits(num_bits, expected_items, hashes, seed).map(|inner| Self { inner })
+    }
+
     fn insert(&self, item: BytesOrStr) -> bool {
         self.inner.insert(item.as_bytes())
     }
@@ -478,6 +627,26 @@ impl BlockedFilter {
 
     fn __contains__(&self, item: BytesOrStr) -> bool {
         self.inner.contains(item.as_bytes())
+    }
+
+    /// Bulk insert from a sequence (list or tuple) of items. Returns the
+    /// number of items that were already fully present (probable
+    /// duplicates). One call instead of one per item; the GIL stays held,
+    /// because this filter is single-threaded.
+    fn insert_many(&self, items: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let items = extract_items("insert_many", items)?;
+        Ok(self
+            .inner
+            .insert_all(items.iter().map(BytesOrStr::as_bytes)))
+    }
+
+    /// Bulk membership test. Returns one `bool` per item, in order.
+    fn contains_many(&self, items: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        let items = extract_items("contains_many", items)?;
+        Ok(items
+            .iter()
+            .map(|item| self.inner.contains(item.as_bytes()))
+            .collect())
     }
 
     fn clear(&mut self) {
@@ -493,6 +662,23 @@ impl BlockedFilter {
     /// because the estimator has no finite answer there.
     fn is_saturated(&self) -> bool {
         self.inner.is_saturated()
+    }
+
+    /// Serialize the filter, including its hash key, to `bytes`.
+    ///
+    /// The key is needed to query the filter after loading, so anyone who
+    /// can read these bytes can test membership and craft colliding
+    /// inputs. Keep them as private as the data the filter describes.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        dump(py, &self.inner)
+    }
+
+    /// Rebuild a filter from `to_bytes` output. Raises `ValueError` on
+    /// anything else, including bytes written by a class with a different
+    /// bit layout. Only load bytes you trust.
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        load(data).map(|inner| Self { inner })
     }
 
     #[getter]

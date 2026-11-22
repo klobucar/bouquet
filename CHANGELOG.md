@@ -4,6 +4,48 @@ All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0, minor
 versions may break.
 
+## [Unreleased]
+
+### Added
+
+- `Filter::union_with` and `Filter::intersect_with`, for filters that share
+  a size, hash count, and hasher. Anything else returns the new
+  `Error::Incompatible` and leaves the filter untouched.
+- `Filter::insert_all`, which inserts every item of an iterator and returns
+  the number that were probably already present, and an `Extend`
+  implementation for `Filter`.
+- Python: every class now has `from_num_bits`, `insert_many`,
+  `contains_many`, `to_bytes`, and `from_bytes`. Previously `from_num_bits`
+  was `ClassicalFilter`-only, `insert_many` was `AtomicFilter`-only, and
+  there was no way to save a filter. The batch calls measured about 30%
+  faster than a Python loop on 100,000 short strings; on `AtomicFilter`
+  they release the GIL.
+- A `fill` benchmark group that times building a filter from empty, and a
+  matching README table.
+
+### Changed
+
+- **Breaking for custom backends:** the `Backend` trait has two new
+  required methods, `union_with` and `intersect_with`. Code that only uses
+  the built-in backends is unaffected.
+- Insert and lookup hot paths no longer branch on filter contents. Filling
+  an empty 1M-item `Classical` filter went from about 37 to about 11 ns per
+  item, and absent lookups on `Classical`, `Atomic`, and `Blocked` from
+  about 21 to about 10 ns (M3 Max). Re-inserting items already present
+  into a filter much larger than the cache may be slightly slower, because
+  the store is now unconditional.
+- `SimdBlocked` builds its block mask in registers, removing a
+  store-forwarding stall. It went from about 22 to about 12 ns per
+  operation on aarch64 and now trails scalar `Blocked` by 1 to 3 ns rather
+  than 2×. The 0.1.0 "known limitation" about it is out of date to that
+  extent.
+- Python: `str` arguments are dispatched before `bytes`, which took
+  `insert(str)` from about 54 to about 40 ns, and `insert_many` borrows
+  `str` and `bytes` items instead of copying them.
+- The Python wheel now depends on `postcard` (already a dev-dependency of
+  the core crate) for `to_bytes` / `from_bytes`.
+- README links are absolute, so the banner and links render on crates.io.
+
 ## [0.1.1] — 2026-11-21
 
 Test and benchmark maintenance. **No library code changed** since 0.1.0; the

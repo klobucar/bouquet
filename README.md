@@ -55,8 +55,10 @@ assert b"hello" in bloom
 
 The bindings expose `ClassicalFilter`, `AtomicFilter`, and `BlockedFilter`.
 Filters accept strings and bytes-like objects and encode strings as UTF-8.
+Every class has `insert_many` and `contains_many` for batches, and
+`to_bytes` / `from_bytes` for saving and loading.
 `AtomicFilter` can be shared across Python threads and releases the GIL
-during bulk insertion with `insert_many`.
+during the batch calls.
 See the [Python bindings guide](https://github.com/klobucar/bouquet/blob/main/bouquet-py/README.md) for API details
 and source builds.
 
@@ -151,6 +153,30 @@ let filter = ClassicalFilter::with_false_pos_seeded(0.001, 0x1234_5678).expected
 filter.insert(&"hello");
 ```
 
+## Bulk inserts and combining filters
+
+`insert_all` inserts every item of an iterator and returns how many were
+probably already present. `Filter` also implements `Extend`.
+
+```rust
+use bouquet::ClassicalFilter;
+
+let build = || ClassicalFilter::with_false_pos(0.01).seed(7).expected_items(1_000);
+let (mut left, right) = (build(), build());
+left.insert_all(["a", "b"]);
+right.insert_all(["b", "c"]);
+
+left.union_with(&right).unwrap();
+assert!(left.contains("a") && left.contains("c"));
+```
+
+`union_with` gives exactly the filter you would get by inserting both sets
+into one filter. `intersect_with` keeps every item present in both, but
+its false-positive rate is higher than a filter built from the common
+items alone. Both require the two filters to share a size, hash count, and
+hasher, and return `Error::Incompatible` otherwise. Filters built with the
+default random key never match, so give both the same `.seed(...)`.
+
 ## Validation and serialization
 
 Invalid sizes, hash counts, and false-positive rates produce a typed error
@@ -179,8 +205,21 @@ cargo bench --features simd
 <!-- BENCHMARKS -->
 
 Median time **per operation** (criterion-reported time / 64 ops per
-iteration). Lower is better. Run on Apple M3 Max (`aarch64-apple-darwin`),
+iteration, except `fill`). Lower is better. Run on Apple M3 Max (`aarch64-apple-darwin`),
 `cargo bench --warm-up-time 2 --measurement-time 5`.
+
+### `fill` (ns/op)
+
+Inserting `Size` distinct items into an empty filter, start to finish
+(criterion-reported time / `Size`). This is the cost of building a filter.
+The `insert` table below keeps inserting into one filter for the whole
+measurement, so it mostly times a filter that is already full.
+
+| Size | Classical | Blocked  | SimdBlocked | fastbloom |
+|------|-----------|----------|-------------|-----------|
+| 10K  | 10.1      | **9.9**  | 11.4        | 10.3      |
+| 100K | **10.0**  | **10.0** | 11.6        | 10.4      |
+| 1M   | 11.3      | 11.0     | 12.0        | **10.9**  |
 
 ### `insert` (ns/op)
 
