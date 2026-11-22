@@ -86,6 +86,19 @@ If you change the API, update `bouquet.pyi` too. Bindings must raise Python
 exceptions rather than panic or abort: validate inputs before they reach the
 core crate's panicking constructors.
 
+## Versioning
+
+The crate and the Python package share one version, set once in the root
+`Cargo.toml` under `[workspace.package]` and inherited by both with
+`version.workspace = true`. A wheel is the core crate plus bindings built
+from the same commit, so the version says which core it contains; a release
+with no binding changes still gets a new Python version, matching the crate.
+
+Releases are cut by tagging the same commit twice, `vX.Y.Z` (crates.io) and
+`py-vX.Y.Z` (PyPI). Each release workflow refuses to publish if its tag
+disagrees with the manifest (`.github/scripts/check-tag-version.sh`, tested
+in CI). Published versions are immutable and tags are never moved.
+
 ## Pull requests
 
 - Keep a PR to one logical change, and include tests for new behaviour or a

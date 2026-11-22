@@ -19,6 +19,13 @@ for.
   `criterion::black_box`.
 - Dev-dependencies updated (criterion 0.8, fastbloom 0.17, rand 0.10,
   foldhash 0.2).
+- **The Python package (`bouquet-bloom`) now shares the crate's version.**
+  Both inherit one `[workspace.package] version`, so a wheel always carries
+  the version of the core crate it was built from. Until now they were
+  versioned independently, so `bouquet-bloom` 0.1.0 (tag `py-v0.1.0`) was
+  published from the same commit as crate 0.1.1 (tag `v0.1.1`). The
+  `bouquet-bloom` 0.1.1 wheel has the same bindings code, rebuilt with the
+  fixes above.
 
 ## [0.1.0] — 2026-11-21
 
