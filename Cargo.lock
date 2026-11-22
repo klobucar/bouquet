@@ -121,6 +121,7 @@ name = "bouquet-py"
 version = "0.1.1"
 dependencies = [
  "bouquet",
+ "postcard",
  "pyo3",
  "pyo3-build-config",
 ]

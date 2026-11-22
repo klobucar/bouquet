@@ -62,14 +62,49 @@ ls ../target/wheels/         # bouquet_bloom-*.whl, one ABI3 wheel per OS/arch
 
 | Python class      | Rust backend         | Notes                                 |
 |-------------------|----------------------|---------------------------------------|
-| `ClassicalFilter` | `bouquet::Classical` | Single-threaded. The only one with `from_num_bits`. |
-| `AtomicFilter`    | `bouquet::Atomic`    | Concurrent; the only one with `insert_many`, which releases the GIL. |
+| `ClassicalFilter` | `bouquet::Classical` | Single-threaded. The general-purpose default. |
+| `AtomicFilter`    | `bouquet::Atomic`    | Concurrent; `insert_many` and `contains_many` release the GIL. |
 | `BlockedFilter`   | `bouquet::Blocked`   | Cache-line-blocked layout. Trades accuracy for locality — see the root README. |
 
-The API is deliberately asymmetric: `from_num_bits` exists only on
-`ClassicalFilter`, and `insert_many` only on `AtomicFilter`. Every class has
-`insert`, `contains`, `__contains__`, `clear`, `estimate_count`,
-`is_saturated`, `num_bits`, and `num_hashes`.
+Every class has the same methods: the `from_false_pos` and `from_num_bits`
+constructors, `insert`, `contains`, `__contains__`, `insert_many`,
+`contains_many`, `clear`, `estimate_count`, `is_saturated`, `to_bytes`,
+`from_bytes`, `num_bits`, and `num_hashes`.
+
+## Batch calls
+
+`insert_many` and `contains_many` take a list or tuple and make one call
+into Rust instead of one per item. On 100,000 short strings that measured
+about 30% faster than a Python loop over `insert` or `contains`.
+
+```python
+f = bouquet.ClassicalFilter.from_false_pos(0.001, 100_000)
+duplicates = f.insert_many(["a", "b", "c"])   # count already present
+hits = f.contains_many(["a", "z"])            # [True, False]
+```
+
+On `AtomicFilter` both release the GIL while they run. They take a real
+sequence, not a generator, and reject a bare `str` or `bytes` instead of
+iterating it character by character.
+
+## Saving and loading
+
+```python
+blob = f.to_bytes()
+g = bouquet.ClassicalFilter.from_bytes(blob)
+assert "a" in g
+```
+
+The bytes include the filter's hash key, because the key is needed to query
+it after loading. Anyone who can read them can test membership and craft
+colliding inputs, so store them as carefully as the data the filter
+describes, and only load bytes you trust.
+
+`ClassicalFilter` and `AtomicFilter` share a bit layout and can load each
+other's bytes. `BlockedFilter` uses a different layout; loading across that
+boundary raises `ValueError` rather than returning a filter that answers
+wrongly. The format carries a version byte, and a future release that
+changes it will reject old bytes instead of misreading them.
 
 `ClassicalFilter` and `BlockedFilter` wrap `!Sync` Rust types and are pinned
 to the thread that created them — passing one to another thread raises rather

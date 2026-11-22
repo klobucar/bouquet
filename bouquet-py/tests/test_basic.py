@@ -368,3 +368,103 @@ def test_seed_determinism():
         if a.contains(x) != c.contains(x):
             diverged = True
     assert diverged, "different-seed filters never disagreed on a non-inserted query"
+
+
+ALL_CLASSES = [bouquet.ClassicalFilter, bouquet.AtomicFilter, bouquet.BlockedFilter]
+
+
+@pytest.mark.parametrize("cls", ALL_CLASSES)
+def test_from_num_bits_on_every_class(cls):
+    f = cls.from_num_bits(1 << 16, hashes=4, seed=1)
+    assert f.num_bits == 1 << 16
+    assert f.num_hashes == 4
+    g = cls.from_num_bits(1 << 16, expected_items=5_000)
+    assert g.num_hashes >= 1
+    with pytest.raises(ValueError):
+        cls.from_num_bits(1 << 16)
+    with pytest.raises(ValueError):
+        cls.from_num_bits(1 << 16, expected_items=10, hashes=4)
+    with pytest.raises(ValueError):
+        cls.from_num_bits(0, hashes=4)
+
+
+@pytest.mark.parametrize("cls", ALL_CLASSES)
+def test_batch_methods_match_single_item_methods(cls):
+    items = [f"item-{i}" for i in range(500)]
+    mixed = [s if i % 2 else s.encode() for i, s in enumerate(items)]
+
+    one_by_one = cls.from_false_pos(0.001, 10_000, seed=7)
+    for item in items:
+        one_by_one.insert(item)
+    batched = cls.from_false_pos(0.001, 10_000, seed=7)
+    assert batched.insert_many(mixed) == 0
+    assert batched.to_bytes() == one_by_one.to_bytes()
+
+    assert batched.insert_many(tuple(items)) > 450
+    queries = [*items[:3], "absent-1", b"absent-2"]
+    assert batched.contains_many(queries) == [batched.contains(q) for q in queries]
+    assert batched.contains_many(queries)[:3] == [True, True, True]
+    assert batched.contains_many([]) == []
+    assert batched.insert_many([]) == 0
+
+
+@pytest.mark.parametrize("cls", ALL_CLASSES)
+@pytest.mark.parametrize("method", ["insert_many", "contains_many"])
+def test_batch_methods_reject_bad_arguments(cls, method):
+    call = getattr(cls.from_false_pos(0.01, 100, seed=0), method)
+    for bad in (b"abc", bytearray(b"abc"), "abc"):
+        with pytest.raises(TypeError, match="sequence of items"):
+            call(bad)
+    with pytest.raises(TypeError):
+        call([1, 2, 3])
+    with pytest.raises(TypeError):
+        call(x for x in ["a"])
+
+
+@pytest.mark.parametrize("cls", ALL_CLASSES)
+def test_bytes_round_trip(cls):
+    f = cls.from_false_pos(0.001, 5_000)  # random key: it must travel too
+    items = [f"item-{i}" for i in range(1_000)]
+    f.insert_many(items)
+
+    blob = f.to_bytes()
+    assert isinstance(blob, bytes)
+    g = cls.from_bytes(blob)
+
+    assert (g.num_bits, g.num_hashes) == (f.num_bits, f.num_hashes)
+    assert all(g.contains_many(items))
+    assert g.estimate_count() == f.estimate_count()
+    assert g.to_bytes() == blob
+    # The copy is independent of the original.
+    g.insert("only-in-g")
+    assert g.to_bytes() != f.to_bytes()
+
+
+def test_flat_layouts_interchange_but_blocked_does_not():
+    classical = bouquet.ClassicalFilter.from_false_pos(0.01, 1_000, seed=3)
+    classical.insert("x")
+    assert "x" in bouquet.AtomicFilter.from_bytes(classical.to_bytes())
+
+    with pytest.raises(ValueError, match="layout"):
+        bouquet.BlockedFilter.from_bytes(classical.to_bytes())
+    blocked = bouquet.BlockedFilter.from_false_pos(0.01, 1_000, seed=3)
+    with pytest.raises(ValueError, match="layout"):
+        bouquet.ClassicalFilter.from_bytes(blocked.to_bytes())
+
+
+@pytest.mark.parametrize("cls", ALL_CLASSES)
+def test_from_bytes_rejects_garbage(cls):
+    blob = cls.from_false_pos(0.01, 1_000, seed=3).to_bytes()
+    bad_blobs = [
+        b"",
+        b"not a filter",
+        blob[:4],  # header only
+        blob[: len(blob) // 2],  # truncated
+        blob[:3] + b"\x02" + blob[4:],  # unknown format version
+        b"\x00" * len(blob),
+    ]
+    for bad in bad_blobs:
+        with pytest.raises(ValueError):
+            cls.from_bytes(bad)
+    with pytest.raises(TypeError):
+        cls.from_bytes("a str")
