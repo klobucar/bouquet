@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/readme-banner.webp" alt="Bouquet — Bloom filters for Rust &amp; Python" width="900">
+  <img src="https://raw.githubusercontent.com/klobucar/bouquet/main/assets/readme-banner.webp" alt="Bouquet — Bloom filters for Rust &amp; Python" width="900">
 </h1>
 
 <p align="center">
@@ -7,7 +7,7 @@
   <a href="https://pypi.org/project/bouquet-bloom/"><img src="https://img.shields.io/pypi/v/bouquet-bloom?logo=pypi" alt="PyPI version"></a>
   <a href="https://docs.rs/bouquet"><img src="https://img.shields.io/docsrs/bouquet?logo=docs.rs" alt="docs.rs"></a>
   <a href="https://github.com/klobucar/bouquet/actions/workflows/ci.yml"><img src="https://github.com/klobucar/bouquet/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licensed"></a>
+  <a href="https://github.com/klobucar/bouquet/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licensed"></a>
   <img src="https://img.shields.io/badge/MSRV-1.95-blue.svg" alt="MSRV 1.95">
 </p>
 
@@ -57,7 +57,7 @@ The bindings expose `ClassicalFilter`, `AtomicFilter`, and `BlockedFilter`.
 Filters accept strings and bytes-like objects and encode strings as UTF-8.
 `AtomicFilter` can be shared across Python threads and releases the GIL
 during bulk insertion with `insert_many`.
-See the [Python bindings guide](./bouquet-py/README.md) for API details
+See the [Python bindings guide](https://github.com/klobucar/bouquet/blob/main/bouquet-py/README.md) for API details
 and source builds.
 
 ## When to use a Bloom filter
@@ -212,8 +212,8 @@ iteration). Lower is better. Run on Apple M3 Max (`aarch64-apple-darwin`),
 On the M3 Max, `Classical` had the lowest `contains_present` latency at
 every size tested. Fastbloom led insertions at 1M and 10M items, and
 `SimdBlocked` led absent lookups at 10M. The SIMD results here are for
-NEON. See the [roadmap](./ROADMAP.md) for backend work in progress.
+NEON. See the [roadmap](https://github.com/klobucar/bouquet/blob/main/ROADMAP.md) for backend work in progress.
 
 ## Rust version and license
 
-The minimum supported Rust version is 1.95. Bouquet is [MIT licensed](./LICENSE).
+The minimum supported Rust version is 1.95. Bouquet is [MIT licensed](https://github.com/klobucar/bouquet/blob/main/LICENSE).
