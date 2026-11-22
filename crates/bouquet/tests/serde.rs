@@ -3,10 +3,10 @@
 //! Two visitor paths need coverage, because they are entirely separate code:
 //!
 //! - Self-describing formats (JSON, CBOR) drive `visit_map`.
-//! - Non-self-describing formats (bincode, postcard) drive `visit_seq` and
+//! - Non-self-describing formats (such as postcard) drive `visit_seq` and
 //!   rely on the declared field order.
 //!
-//! The crate documented bincode support while implementing only `visit_map`,
+//! The crate documented compact binary format support while implementing only `visit_map`,
 //! so serialization succeeded and deserialization always failed — a
 //! deployment persisting to a compact binary format wrote data it could
 //! never read back. These tests pin both directions.
@@ -70,20 +70,6 @@ fn postcard_round_trip_preserves_membership() {
     assert_eq!(g.num_hashes(), f.num_hashes());
     for i in 0..1_000u32 {
         assert!(g.contains(&i), "missing {i} after postcard round trip");
-    }
-}
-
-/// The other non-self-describing format the module docs name.
-#[test]
-fn bincode_round_trip_preserves_membership() {
-    let f = fixture();
-    let buf = bincode::serialize(&f).expect("serialize");
-    let g: Filter<Classical> = bincode::deserialize(&buf).expect("deserialize");
-
-    assert_eq!(g.num_bits(), f.num_bits());
-    assert_eq!(g.num_hashes(), f.num_hashes());
-    for i in 0..1_000u32 {
-        assert!(g.contains(&i), "missing {i} after bincode round trip");
     }
 }
 

@@ -3,7 +3,7 @@
 //! The on-wire form is a struct with `layout`, `num_bits`, `num_hashes`,
 //! `hasher`, and `bits` fields, in that order. Self-describing formats
 //! (JSON, CBOR) round trip through [`Visitor::visit_map`]; non-self-describing
-//! formats (bincode, postcard) round trip through [`Visitor::visit_seq`] and
+//! formats (such as postcard) round trip through [`Visitor::visit_seq`] and
 //! depend on that field order.
 //!
 //! Deserialization is *manual* and *defensive*. It rejects:
@@ -121,7 +121,7 @@ where
         f.write_str("a bouquet Filter struct")
     }
 
-    /// Non-self-describing formats (bincode, postcard) drive the visitor
+    /// Non-self-describing formats (such as postcard) drive the visitor
     /// with a sequence in declared field order. Without this the crate could
     /// *write* those formats but never read them back.
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
