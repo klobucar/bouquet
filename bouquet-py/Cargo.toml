@@ -1,6 +1,6 @@
 [package]
 name = "bouquet-py"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.95"
 description = "Python bindings for the bouquet pluggable Bloom filter library."

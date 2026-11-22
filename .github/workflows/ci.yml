@@ -148,6 +148,27 @@ jobs:
   # magnitude slower than native, and it ran on every PR push. It lives in
   # miri.yml (pushes to main, weekly, manual) instead.
 
+  # The release workflows refuse to publish when the tag and manifest version
+  # disagree. That check is the last guard before an immutable upload, so it
+  # is tested here rather than discovered broken on release day.
+  release-scripts:
+    name: release tag check (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/scripts/test-check-tag-version.sh
+      # Also run the real check against the real manifests: the version this
+      # commit would release must be one the script accepts for its own tag.
+      - name: check against this repository's manifests
+        run: |
+          set -euo pipefail
+          crate="$(cargo metadata --no-deps --format-version 1 | jq -r 'first(.packages[] | select(.name == "bouquet") | .version)')"
+          py="$(cargo metadata --no-deps --format-version 1 | jq -r 'first(.packages[] | select(.name == "bouquet-py") | .version)')"
+          .github/scripts/check-tag-version.sh "v$crate" v bouquet
+          .github/scripts/check-tag-version.sh "py-v$py" py-v bouquet-py
+
   docs:
     name: docs (docs.rs config)
     runs-on: ubuntu-latest

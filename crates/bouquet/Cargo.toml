@@ -1,6 +1,6 @@
 [package]
 name = "bouquet"
-version = "0.1.1"
+version.workspace = true
 edition = "2021"
 rust-version = "1.95"
 description = "Pluggable Bloom filters: pick your blooms (classical, atomic, more to come)."
